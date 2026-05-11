@@ -1,0 +1,68 @@
+# ==========================================
+# DATASET - Ảnh cá nhân, KHÔNG được up lên GitHub
+# ==========================================
+data/
+
+# ==========================================
+# FACE EMBEDDINGS - Dữ liệu sinh trắc học trích từ ảnh cá nhân
+# ==========================================
+MTCNN_FACENET/face_db.pt
+SRCFD_ARCFACE_FAISS/face_db_0.pkl
+SRCFD_ARCFACE_FAISS/face_db_1.pkl
+RETINAFACE_ARCFACE/face_database.npy
+MTCNN_LBP-SOBELLBP_SVM/face_recognition_model/train_cache.npz
+
+# ==========================================
+# MODEL FILES LỚN - Tải về riêng (xem README)
+# ==========================================
+# dlib pretrained model (96MB) - download từ dlib.net
+HOG_SVM/shape_predictor_68_face_landmarks.dat
+
+# Trained models (quá lớn cho GitHub)
+HOG_SVM/models_svm.pkl
+MTCNN_LBP-SOBELLBP_SVM/face_recognition_model/knn.pkl
+MTCNN_LBP-SOBELLBP_SVM/face_recognition_model/pca.pkl
+
+# ==========================================
+# PYTHON
+# ==========================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ==========================================
+# JUPYTER NOTEBOOK - Checkpoints
+# ==========================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ==========================================
+# VIRTUAL ENVIRONMENT
+# ==========================================
+venv/
+env/
+.env/
+.venv/
+
+# ==========================================
+# IDE / EDITOR
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# FILE KHÔNG LIÊN QUAN ĐẾN PROJECT
+# ==========================================
+council-*.html
+council-*.md
+demo_gradio.md
