@@ -37,6 +37,9 @@ train_path = os.path.join(base_dataset_path, "train")
 test_path = os.path.join(base_dataset_path, "test")
 val_path = os.path.join(base_dataset_path, "val")
 
+# Ngưỡng nhận diện (Confidence threshold)
+CONFIDENCE_THRESHOLD = 0.6
+
 def extract_features(dataset_path, augment=False):
     X_features = [] 
     Y_labels = []   
