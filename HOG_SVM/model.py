@@ -37,6 +37,9 @@ train_path = os.path.join(base_dataset_path, "train")
 test_path = os.path.join(base_dataset_path, "test")
 val_path = os.path.join(base_dataset_path, "val")
 
+# Ngưỡng nhận diện (Confidence threshold)
+CONFIDENCE_THRESHOLD = 0.6
+
 def extract_features(dataset_path, augment=False):
     X_features = [] 
     Y_labels = []   
@@ -67,11 +70,11 @@ def extract_features(dataset_path, augment=False):
                 shape = predictor(img, face)
                 face_chip = dlib.get_face_chip(img, shape, size=112)
                 
-                # 2. Chuyển về ảnh xám và resize về 64x64 để đưa vào HOG
+                # 2. Chuyển về ảnh xám và resize về 128x128 để đưa vào HOG
                 gray_chip = cv2.cvtColor(face_chip, cv2.COLOR_BGR2GRAY)
                 face_img_resized = cv2.resize(gray_chip, (128, 128))
                 
-                # Tính toán vector HOG của khuôn mặt (vector dài 1764)
+                # Tính toán vector HOG của khuôn mặt (vector dài 8100)
                 hog_feature = hog(face_img_resized, orientations=9, pixels_per_cell=(8, 8), 
                                   cells_per_block=(2, 2), block_norm='L2-Hys', visualize=False)
                 
