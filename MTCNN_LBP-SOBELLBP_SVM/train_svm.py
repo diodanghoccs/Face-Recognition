@@ -1,0 +1,352 @@
+# ╔══════════════════════════════════════════════════════╗
+# ║  BƯỚC 2: Load dataset + Feature extraction + Train  ║
+# ║  Multi-scale LBP + Sobel-LBP (Zhao 2008)             ║
+# ║   → PCA whiten → SVM (probability=False)             ║
+# ║   → CalibratedClassifierCV(FrozenEstimator) trên     ║
+# ║     val_calib (1 nửa val).                           ║
+# ║   → val_thresh (nửa kia) để pick T_p/T_m ở B3.       ║
+# ║                                                       ║
+# ║  Chạy: python train_svm.py                           ║
+# ║  Tất cả tham số đọc từ ../config.py (cfg.LBP_*).     ║
+# ╚══════════════════════════════════════════════════════╝
+import os, json, hashlib, datetime
+import cv2, numpy as np, random
+from pathlib import Path
+
+import sklearn
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.decomposition import PCA
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+import torch
+
+from feature_utils import extract_features
+
+# ╔══════════════════════════════════════════════════════╗
+# ║                     CONFIG                           ║
+# ║  Chỉnh đường dẫn / hyper-param trong ../config.py    ║
+# ╚══════════════════════════════════════════════════════╝
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+from config import cfg
+
+CROP_ROOT     = str(cfg.LBP_CROP_ROOT)
+MODEL_DIR     = str(cfg.LBP_MODEL_DIR)
+RANDOM_STATE  = int(cfg.LBP_RANDOM_STATE)
+PCA_DIM       = int(cfg.LBP_PCA_DIM)
+
+# Hard pairs hay nhầm lẫn — boost class_weight cao hơn 'balanced'
+HARD_CLASSES = set(cfg.LBP_HARD_CLASSES)
+HARD_WEIGHT  = float(cfg.LBP_HARD_WEIGHT)
+
+# Hard-negative mining: chạy thêm 1 vòng train với weight tăng cho sample bị nhầm
+HARD_NEGATIVE_MINING = bool(cfg.LBP_HARD_NEGATIVE_MINING)
+
+# Augment knobs
+AUG_NOISE_RANGE       = int(cfg.LBP_AUG_NOISE_RANGE)
+AUG_BRIGHT_HIGH_ALPHA = float(cfg.LBP_AUG_BRIGHT_HIGH_ALPHA)
+AUG_BRIGHT_HIGH_BETA  = float(cfg.LBP_AUG_BRIGHT_HIGH_BETA)
+AUG_BRIGHT_LOW_ALPHA  = float(cfg.LBP_AUG_BRIGHT_LOW_ALPHA)
+AUG_BRIGHT_LOW_BETA   = float(cfg.LBP_AUG_BRIGHT_LOW_BETA)
+
+# Val split (cho recommendation #5: tách Platt-fit khỏi threshold-pick)
+VAL_THRESH_FRAC = float(cfg.LBP_VAL_THRESH_FRAC)
+
+NJOBS_OFFSET = int(cfg.LBP_NJOBS_OFFSET)
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# ── Reproducibility: seed mọi RNG global ──────────────────────
+random.seed(RANDOM_STATE)
+np.random.seed(RANDOM_STATE)
+torch.manual_seed(RANDOM_STATE)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(RANDOM_STATE)
+# RNG dành riêng cho augment (deterministic giữa các lần chạy)
+_AUG_RNG = np.random.default_rng(RANDOM_STATE)
+
+
+# ╔══════════════════════════════════════════════════════╗
+# ║  Augmentation — 5 variants / ảnh                    ║
+# ║  (controlled condition: bỏ rotation, perspective,   ║
+# ║   blur — chỉ giữ flip + brightness + noise)         ║
+# ╚══════════════════════════════════════════════════════╝
+def augment(img):
+    noise = np.clip(
+        img.astype(np.int16)
+        + _AUG_RNG.integers(-AUG_NOISE_RANGE, AUG_NOISE_RANGE, img.shape, dtype=np.int16),
+        0, 255,
+    ).astype(np.uint8)
+
+    return [
+        img,
+        cv2.flip(img, 1),
+        cv2.convertScaleAbs(img, alpha=AUG_BRIGHT_HIGH_ALPHA, beta=AUG_BRIGHT_HIGH_BETA),
+        cv2.convertScaleAbs(img, alpha=AUG_BRIGHT_LOW_ALPHA,  beta=AUG_BRIGHT_LOW_BETA),
+        noise,
+    ]
+
+
+# ╔══════════════════════════════════════════════════════╗
+# ║  Load 3 tập đã split + MTCNN-crop sẵn               ║
+# ╚══════════════════════════════════════════════════════╝
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+def _load_split(split_name):
+    imgs, lbls = [], []
+    root = Path(CROP_ROOT) / split_name
+    if not root.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy {root}. Chạy mtcnn_finetuned_crop.py trước."
+        )
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        loaded = 0
+        for fp in sorted(d.iterdir()):
+            if fp.suffix.lower() not in IMG_EXTS:
+                continue
+            img = cv2.imread(str(fp))
+            if img is None:
+                continue
+            imgs.append(img); lbls.append(d.name); loaded += 1
+        print(f"  [{split_name:5s}] {d.name:10s}: {loaded} ảnh")
+    return imgs, np.array(lbls)
+
+
+def _build_class_weight(le):
+    """Boost weight cho HARD_CLASSES, các class còn lại = 1.0."""
+    w = {}
+    for i, cls in enumerate(le.classes_):
+        w[i] = HARD_WEIGHT if cls in HARD_CLASSES else 1.0
+    return w
+
+
+def _train_svm(X_train, y_train, sample_weight, le, label="initial"):
+    N_JOBS = max(1, os.cpu_count() - NJOBS_OFFSET)
+    print(f"\n[{label}] GridSearchCV... (dùng {N_JOBS}/{os.cpu_count()} cores)")
+
+    # Cho phép override grid từ config (LBP_GRID_PARAMS); fallback default.
+    param_grid = cfg.LBP_GRID_PARAMS or [
+        {
+            "kernel": ["rbf"],
+            "C":      [0.1, 1, 10, 50, 100, 500],
+            "gamma":  ["scale", "auto", 1e-4, 5e-4, 1e-3, 5e-3, 1e-2],
+        },
+        {
+            "kernel": ["poly"],
+            "degree": [2, 3],
+            "C":      [1, 10, 100],
+            "gamma":  ["scale", 1e-3, 1e-2],
+            "coef0":  [0, 1],
+        },
+    ]
+    cw = _build_class_weight(le) if HARD_CLASSES else None
+    grid = GridSearchCV(
+        SVC(probability=False, class_weight=cw, random_state=RANDOM_STATE),
+        param_grid,
+        cv=5,
+        n_jobs=N_JOBS,
+        verbose=1,
+    )
+    fit_kw = {"sample_weight": sample_weight} if sample_weight is not None else {}
+    grid.fit(X_train, y_train, **fit_kw)
+    print(f"[{label}] Best params : {grid.best_params_}")
+    print(f"[{label}] CV accuracy : {grid.best_score_*100:.1f}%")
+    return grid.best_estimator_
+
+
+def _hash_manifest(payload: dict) -> str:
+    """SHA-1 ngắn cho manifest — dùng để khoá compat giữa train_cache và artifacts."""
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def main():
+    print("Đang load dataset đã split + crop...")
+    images_train, labels_train = _load_split("train")
+    print()
+    images_val,   labels_val   = _load_split("val")
+    print()
+    images_test,  labels_test  = _load_split("test")
+
+    n_aug = len(augment(images_train[0]))
+    feat0 = extract_features(images_train[0])
+    print(f"\n{'═'*52}")
+    print(f"  Train : {len(images_train):>5} ảnh  →  sau aug ×{n_aug} = {len(images_train)*n_aug}")
+    print(f"  Val   : {len(images_val):>5} ảnh")
+    print(f"  Test  : {len(images_test):>5} ảnh")
+    print(f"  Classes: {sorted(set(labels_train.tolist()))}")
+    print(f"  Feature dim: {len(feat0)}")
+    print(f"{'═'*52}")
+
+    # ── Encode labels ─────────────────────────────────────────────
+    le          = LabelEncoder()
+    y_train_raw = le.fit_transform(labels_train)
+    y_val       = le.transform(labels_val)
+    y_test      = le.transform(labels_test)
+
+    # ── Augment chỉ tập train ─────────────────────────────────────
+    X_train, y_train = [], []
+    for img, lbl in zip(images_train, y_train_raw):
+        for aug_img in augment(img):
+            X_train.append(extract_features(aug_img))
+            y_train.append(lbl)
+
+    X_train = np.array(X_train, dtype=np.float32)
+    y_train = np.array(y_train)
+
+    # ── Val & Test (KHÔNG augment) ────────────────────────────────
+    X_val  = np.array([extract_features(img) for img in images_val],  dtype=np.float32)
+    X_test = np.array([extract_features(img) for img in images_test], dtype=np.float32)
+    print(f"Sau aug — Train: {len(X_train)}  Val: {len(X_val)}  Test: {len(X_test)}")
+
+    # ── Scale ─────────────────────────────────────────────────────
+    scaler    = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_val_s   = scaler.transform(X_val)
+    X_test_s  = scaler.transform(X_test)
+
+    # ── PCA analysis nhanh — tính full để biết elbow ─────────────
+    pca_full = PCA(whiten=False, random_state=RANDOM_STATE)
+    pca_full.fit(X_train_s)
+    cumvar_full = np.cumsum(pca_full.explained_variance_ratio_)
+    print("  Variance retention (full PCA):")
+    for target in [0.70, 0.80, 0.90, 0.95]:
+        n_needed = int(np.searchsorted(cumvar_full, target)) + 1
+        marker = "  ← hiện tại" if n_needed == PCA_DIM else ""
+        print(f"    {target*100:.0f}%  →  {n_needed:>4} components{marker}")
+    idx = min(PCA_DIM - 1, len(cumvar_full) - 1)
+    print(f"    [{PCA_DIM} components đang dùng → {cumvar_full[idx]*100:.1f}%]")
+
+    # ── PCA (giữ PCA_DIM chiều, whiten) ───────────────────────────
+    n_comp_max = min(PCA_DIM, X_train_s.shape[0], X_train_s.shape[1])
+    pca       = PCA(n_components=n_comp_max, whiten=True, random_state=RANDOM_STATE)
+    X_train_p = pca.fit_transform(X_train_s)
+    X_val_p   = pca.transform(X_val_s)
+    X_test_p  = pca.transform(X_test_s)
+    print(f"PCA: {X_train_s.shape[1]} → {X_train_p.shape[1]} dims  (whiten=True, "
+          f"explained variance={pca.explained_variance_ratio_.sum()*100:.1f}%)")
+
+    # ── SVM lần 1 (probability=False — calibrate sau trên val_calib) ──
+    svm = _train_svm(X_train_p, y_train, sample_weight=None, le=le, label="initial")
+
+    # ── Hard-negative mining (mặc định tắt cho dataset balanced) ──
+    if HARD_NEGATIVE_MINING:
+        y_pred_train = svm.predict(X_train_p)
+        wrong        = (y_pred_train != y_train)
+        n_wrong      = int(wrong.sum())
+        print(f"\nHard-negative mining: {n_wrong}/{len(y_train)} sample sai trên train.")
+
+        if n_wrong > 0:
+            sample_w = np.ones(len(y_train), dtype=np.float64)
+            sample_w[wrong] = 3.0   # tăng weight 3× cho sample sai
+            hard_idx = np.array([le.classes_[y] in HARD_CLASSES for y in y_train])
+            sample_w[wrong & hard_idx] = 5.0
+            svm = _train_svm(X_train_p, y_train, sample_weight=sample_w, le=le, label="hard-neg")
+
+    # ── Tách val → val_calib (Platt) + val_thresh (pick T_p/T_m/boost) ──
+    if VAL_THRESH_FRAC > 0.0 and len(X_val_p) >= 4:
+        X_val_cal, X_val_thr, y_val_cal, y_val_thr = train_test_split(
+            X_val_p, y_val,
+            test_size=VAL_THRESH_FRAC,
+            stratify=y_val if len(np.unique(y_val)) > 1 else None,
+            random_state=RANDOM_STATE,
+        )
+        print(f"\nVal split  →  calib: {len(X_val_cal)} mẫu  |  thresh: {len(X_val_thr)} mẫu")
+    else:
+        # Legacy: dùng cả val cho cả 2 mục đích (có overfit-val, không khuyến nghị).
+        X_val_cal, y_val_cal = X_val_p, y_val
+        X_val_thr, y_val_thr = X_val_p, y_val
+        print(f"\n⚠️ VAL_THRESH_FRAC = 0 → val dùng chung cho Platt và threshold (legacy).")
+
+    # ── Calibrate xác suất trên val_calib (frozen SVM, không leakage) ──
+    print(f"\nCalibrating Platt sigmoid trên val_calib ({len(X_val_cal)} mẫu)...")
+    cal_svm = CalibratedClassifierCV(FrozenEstimator(svm), method="sigmoid")
+    cal_svm.fit(X_val_cal, y_val_cal)
+    print(f"  Calibrated.")
+
+    # ── Evaluate ──────────────────────────────────────────────────
+    train_acc    = cal_svm.score(X_train_p, y_train)
+    val_cal_acc  = cal_svm.score(X_val_cal, y_val_cal)
+    val_thr_acc  = cal_svm.score(X_val_thr, y_val_thr)
+    test_acc     = cal_svm.score(X_test_p,  y_test)
+    print(f"\n{'═'*52}")
+    print(f"  Train     accuracy : {train_acc*100:.1f}%")
+    print(f"  Val-calib accuracy : {val_cal_acc*100:.1f}%  (đã được Platt fit, sẽ lạc quan)")
+    print(f"  Val-thresh accuracy: {val_thr_acc*100:.1f}%  (chưa được Platt thấy)")
+    print(f"  Test      accuracy : {test_acc*100:.1f}%")
+    print(f"{'═'*52}")
+
+    y_pred = cal_svm.predict(X_test_p)
+    print("\nClassification Report (Test):")
+    print(classification_report(y_test, y_pred, target_names=le.classes_))
+
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=le.classes_, yticklabels=le.classes_)
+    plt.title("Confusion Matrix (Test Set)")
+    plt.ylabel("True"); plt.xlabel("Predicted")
+    plt.tight_layout(); plt.savefig(os.path.join(MODEL_DIR, "confusion_matrix.png"), dpi=150)
+    print(f"  Confusion matrix saved to {MODEL_DIR}/confusion_matrix.png")
+    plt.close()
+
+    # ── Lưu model ─────────────────────────────────────────────────
+    joblib.dump(cal_svm, os.path.join(MODEL_DIR, "svm_face.pkl"))
+    joblib.dump(scaler,  os.path.join(MODEL_DIR, "scaler.pkl"))
+    joblib.dump(pca,     os.path.join(MODEL_DIR, "pca.pkl"))
+    joblib.dump(le,      os.path.join(MODEL_DIR, "label_encoder.pkl"))
+
+    # Xóa lda.pkl cũ nếu có (tránh test/calibrate script load nhầm)
+    old_lda = os.path.join(MODEL_DIR, "lda.pkl")
+    if os.path.exists(old_lda):
+        os.remove(old_lda)
+        print(f"Đã xóa {old_lda} (không còn dùng LDA)")
+
+    # ── Lưu cache cho calibrate_thresholds ───────────────────────
+    np.savez(os.path.join(MODEL_DIR, "train_cache.npz"),
+             X_train_p=X_train_p,
+             X_val_cal_p=X_val_cal, y_val_cal=y_val_cal,
+             X_val_thr_p=X_val_thr, y_val_thr=y_val_thr,
+             # giữ key cũ để backward-compat với code khác đã quen với X_val_p
+             X_val_p=X_val_p,        y_val=y_val,
+             X_test_p=X_test_p,      y_test=y_test)
+
+    # ── Lưu manifest để B3 verify không bị stale-cache ───────────
+    manifest = {
+        "schema_version"   : 2,
+        "created"          : datetime.datetime.now().isoformat(timespec="seconds"),
+        "sklearn_version"  : sklearn.__version__,
+        "random_state"     : RANDOM_STATE,
+        "feature_dim"      : int(X_train.shape[1]),
+        "pca_dim"          : int(X_train_p.shape[1]),
+        "n_classes"        : int(len(le.classes_)),
+        "classes"          : list(le.classes_),
+        "n_train_aug"      : int(len(X_train_p)),
+        "n_val_calib"      : int(len(X_val_cal)),
+        "n_val_thresh"     : int(len(X_val_thr)),
+        "n_test"           : int(len(X_test_p)),
+        "val_thresh_frac"  : VAL_THRESH_FRAC,
+        "augment_variants" : n_aug,
+        "hard_classes"     : sorted(HARD_CLASSES),
+        "hard_weight"      : HARD_WEIGHT,
+    }
+    manifest["hash"] = _hash_manifest({
+        k: v for k, v in manifest.items() if k not in ("created", "hash")
+    })
+    with open(os.path.join(MODEL_DIR, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    print(f"\nModel lưu tại: {MODEL_DIR}")
+    print(f"Manifest hash: {manifest['hash']}")
+
+
+if __name__ == "__main__":
+    main()

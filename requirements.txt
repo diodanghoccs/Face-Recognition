@@ -1,0 +1,16 @@
+gradio>=4.0
+opencv-python
+opencv-contrib-python
+pillow
+numpy<2
+pandas
+scikit-learn
+scikit-image
+joblib
+torch
+torchvision
+facenet-pytorch
+insightface
+onnxruntime
+faiss-cpu
+dlib

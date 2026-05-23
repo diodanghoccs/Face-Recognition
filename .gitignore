@@ -1,0 +1,76 @@
+# ==========================================
+# DATASET - Ảnh cá nhân, KHÔNG được up lên GitHub
+# ==========================================
+data/
+
+# ==========================================
+# FACE EMBEDDINGS - Dữ liệu sinh trắc học trích từ ảnh cá nhân
+# ==========================================
+MTCNN_FACENET/face_db.pt
+SRCFD_ARCFACE_FAISS/face_db_0.pkl
+SRCFD_ARCFACE_FAISS/face_db_1.pkl
+RETINAFACE_ARCFACE/face_database.npy
+MTCNN_LBP-SOBELLBP_SVM/face_recognition_model/train_cache.npz
+
+# ==========================================
+# MODEL FILES LỚN - đẩy qua Git LFS (xem .gitattributes)
+# (các file .pkl / .dat / .pt / .pth / .onnx / .bin / .index / .faiss / .npy
+#  đã được track bằng LFS, không exclude ở đây)
+# ==========================================
+
+# ==========================================
+# PYTHON
+# ==========================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ==========================================
+# JUPYTER NOTEBOOK - Checkpoints
+# ==========================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ==========================================
+# VIRTUAL ENVIRONMENT
+# ==========================================
+venv/
+env/
+.env/
+.venv/
+
+# ==========================================
+# IDE / EDITOR
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# BẢN DUPLICATE
+# ==========================================
+Face_Recognition/
+
+# ==========================================
+# GRADIO CACHE
+# ==========================================
+gradio_cached_examples/
+flagged/
+.gradio/
+
+# ==========================================
+# FILE KHÔNG LIÊN QUAN ĐẾN PROJECT
+# ==========================================
+council-*.html
+council-*.md
+demo_gradio.md
+zi19CvHo

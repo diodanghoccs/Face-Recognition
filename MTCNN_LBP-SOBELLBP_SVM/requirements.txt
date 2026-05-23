@@ -1,0 +1,23 @@
+# Phụ thuộc cho pipeline MTCNN_LBP-SOBELLBP_SVM (B1 → B2 → B3).
+# Cài: pip install -r requirements.txt
+
+# scikit-learn 1.6 trở lên là BẮT BUỘC vì train_svm.py dùng
+# sklearn.frozen.FrozenEstimator (chỉ có từ 1.6).
+scikit-learn>=1.6
+
+# Face detection backbone
+facenet-pytorch>=2.5
+torch>=2.0
+
+# CV + features
+opencv-python>=4.8
+scikit-image>=0.21
+numpy>=1.24
+
+# Persistence + UX
+joblib>=1.3
+tqdm>=4.65
+
+# Plotting (chỉ cần khi train + calibrate, không bắt buộc cho inference)
+matplotlib>=3.7
+seaborn>=0.12

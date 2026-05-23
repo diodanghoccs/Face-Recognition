@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Code Preview — MTCNN_LBP-SOBELLBP_SVM</title>
+<style>
+  :root{
+    --bg:#0f0f23; --card:#1a1a2e; --card2:#1f1f38; --border:#2d2d44;
+    --text:#e6e6f0; --muted:#9a9ab0;
+    --purple:#6C5CE7; --green:#00B894; --pink:#FD79A8;
+    --blue:#74B9FF; --orange:#FDCB6E; --ai:#A29BFE; --gray:#636E72;
+    --code:#13132a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    line-height:1.55;padding:32px 28px 80px;max-width:1180px;margin:0 auto}
+  h1{font-size:34px;margin:0 0 8px;background:linear-gradient(90deg,var(--purple),var(--ai),var(--pink));
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  h2{font-size:22px;margin:36px 0 14px;color:var(--purple);border-bottom:1px solid var(--border);padding-bottom:6px}
+  h3{font-size:17px;margin:18px 0 8px;color:var(--ai)}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:18px}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 24px}
+  .badge{padding:4px 10px;border-radius:999px;font-size:12px;
+    background:var(--card);border:1px solid var(--border);color:var(--text)}
+  .badge.py{border-color:#3776AB;color:#9bc5e8}
+  .badge.torch{border-color:#EE4C2C;color:#f6a799}
+  .badge.sklearn{border-color:var(--orange);color:var(--orange)}
+  .badge.cv{border-color:var(--green);color:var(--green)}
+  .badge.ai{border-color:var(--ai);color:var(--ai)}
+
+  /* tabs */
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:18px 0 22px;flex-wrap:wrap}
+  .tab{padding:9px 14px;background:transparent;color:var(--muted);border:none;cursor:pointer;
+    border-bottom:2px solid transparent;font-size:14px}
+  .tab.active{color:var(--text);border-bottom-color:var(--purple)}
+  .tab:hover{color:var(--text)}
+  .panel{display:none;animation:fade .4s ease}
+  .panel.active{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* cards */
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+    padding:16px 18px;margin:12px 0;box-shadow:0 2px 10px rgba(0,0,0,0.25)}
+  .card.green{border-left:4px solid var(--green)}
+  .card.orange{border-left:4px solid var(--orange)}
+  .card.pink{border-left:4px solid var(--pink)}
+  .card.ai{border-left:4px solid var(--ai)}
+  .card.blue{border-left:4px solid var(--blue)}
+  .grid{display:grid;gap:14px}
+  .grid-2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .grid-3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+
+  code{font-family:'Cascadia Code','Fira Code',Consolas,monospace;
+    background:var(--code);padding:2px 6px;border-radius:4px;font-size:13px;color:#dfe1ff}
+  pre{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;
+    border:1px solid var(--border);font-size:13px;line-height:1.5;margin:8px 0}
+  pre code{background:transparent;padding:0}
+
+  /* architecture diagram */
+  .arch{display:flex;flex-direction:column;gap:8px;padding:12px 0}
+  .arch-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .node{padding:10px 14px;border-radius:10px;font-size:13px;font-weight:500;
+    background:var(--card2);border:1px solid var(--border);min-width:160px;text-align:center}
+  .node.data{background:rgba(0,184,148,.12);border-color:var(--green)}
+  .node.process{background:rgba(116,185,255,.12);border-color:var(--blue)}
+  .node.model{background:rgba(162,155,254,.14);border-color:var(--ai)}
+  .node.train{background:rgba(253,121,168,.12);border-color:var(--pink)}
+  .node.output{background:rgba(253,203,110,.12);border-color:var(--orange)}
+  .node.cfg{background:rgba(99,110,114,.15);border-color:var(--gray);color:var(--muted)}
+  .node small{display:block;color:var(--muted);font-size:11px;font-weight:400;margin-top:3px}
+  .arrow{color:var(--purple);font-size:18px;font-weight:bold}
+
+  /* pipeline cards */
+  .pipeline{display:flex;gap:0;align-items:stretch;flex-wrap:wrap}
+  .pstep{flex:1;min-width:220px;background:var(--card);border:1px solid var(--border);
+    border-radius:12px;padding:14px;margin:8px;position:relative;transition:transform .15s}
+  .pstep:hover{transform:translateY(-2px);border-color:var(--purple)}
+  .pstep .num{position:absolute;top:-10px;left:14px;background:var(--purple);color:white;
+    padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
+  .pstep h4{margin:6px 0;font-size:15px}
+  .pstep .file{color:var(--blue);font-size:12px;font-family:'Cascadia Code',monospace}
+  .pstep p{color:var(--muted);font-size:13px;margin:6px 0 0}
+
+  /* tables */
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th{text-align:left;padding:9px 10px;background:var(--card2);
+    color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)}
+  td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:hover td{background:rgba(108,92,231,.04)}
+  td .loc{color:var(--blue);font-family:'Cascadia Code',monospace;font-size:12px}
+  td .val{color:var(--orange);font-family:'Cascadia Code',monospace;font-size:12px}
+
+  .imp-high{color:#ff7a90;font-weight:600}
+  .imp-med{color:var(--orange);font-weight:600}
+  .imp-low{color:var(--green);font-weight:600}
+  .repro{display:inline-block;padding:3px 10px;border-radius:6px;font-weight:600;font-size:12px}
+  .repro.med{background:rgba(253,203,110,.15);color:var(--orange);border:1px solid var(--orange)}
+
+  details{background:var(--card);border:1px solid var(--border);border-radius:8px;
+    padding:10px 14px;margin:8px 0}
+  details[open]{background:var(--card2)}
+  summary{cursor:pointer;font-weight:500;color:var(--ai)}
+  summary:hover{color:var(--purple)}
+
+  ul.clean{padding-left:20px}
+  ul.clean li{margin:4px 0}
+  .kpi{display:flex;align-items:baseline;gap:8px}
+  .kpi b{font-size:22px;color:var(--ai)}
+  .kpi span{color:var(--muted);font-size:13px}
+
+  footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--border);
+    color:var(--muted);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+
+<h1>MTCNN + LBP/Sobel-LBP + SVM</h1>
+<div class="sub">Hệ thống nhận diện khuôn mặt open-set bằng <b>classical ML</b> — MTCNN (đã fine-tune) tách mặt &rarr; đặc trưng LBP đa tỉ lệ + Sobel-LBP &rarr; PCA whitening &rarr; SVM &rarr; Platt calibration &rarr; ngưỡng 2-tín hiệu để từ chối unknown.</div>
+
+<div class="badges">
+  <span class="badge py">Python</span>
+  <span class="badge torch">PyTorch (facenet-pytorch)</span>
+  <span class="badge sklearn">scikit-learn &ge; 1.6</span>
+  <span class="badge cv">OpenCV + scikit-image</span>
+  <span class="badge ai">AI/ML — Classical</span>
+  <span class="badge">4 file Python · ~720 dòng</span>
+</div>
+
+<div class="tabs" id="tabs">
+  <button class="tab active" data-t="overview">Tổng quan</button>
+  <button class="tab" data-t="model">Mô hình &amp; huấn luyện</button>
+  <button class="tab" data-t="config">Cấu hình</button>
+  <button class="tab" data-t="deps">Phụ thuộc</button>
+  <button class="tab" data-t="consensus">Đồng thuận &amp; rủi ro</button>
+  <button class="tab" data-t="code">Trích đoạn code</button>
+</div>
+
+<!-- ───────────── OVERVIEW ───────────── -->
+<section class="panel active" id="overview">
+
+<h2>Định danh dự án</h2>
+<div class="card">
+  Dự án Python hiện thực một hệ <b>face recognition cổ điển</b> — không dùng deep embedding end-to-end. Pipeline tách rõ 4 file: tách mặt bằng MTCNN đã fine-tune, trích đặc trưng thủ công (LBP đa tỉ lệ + Sobel-LBP theo Zhao et al. 2008) lên thành vector 10 800-d, giảm chiều bằng PCA whitening còn 368-d, phân loại bằng SVM (RBF/poly với GridSearchCV), hiệu chuẩn xác suất Platt trên tập <b>val</b> với <code>FrozenEstimator</code>, và cuối cùng chọn ngưỡng <code>T_p</code>, <code>T_m</code> để từ chối khuôn mặt unknown. Toàn bộ artifact được lưu pickle/npz trong <code>face_recognition_model/</code>.
+</div>
+
+<h2>Bản đồ kiến trúc</h2>
+<div class="card">
+<div class="arch">
+  <div class="arch-row">
+    <div class="node data">Raw photos<br><small>SPLIT_ROOT/{train,val,test}</small></div>
+    <span class="arrow">→</span>
+    <div class="node process">MTCNN fine-tuned<br><small>mtcnn_finetuned_crop.py</small></div>
+    <span class="arrow">→</span>
+    <div class="node data">Aligned crops 128×128<br><small>CROP_ROOT</small></div>
+  </div>
+  <div class="arch-row">
+    <div class="node data">Aligned crops</div>
+    <span class="arrow">→</span>
+    <div class="node process">extract_features()<br><small>feature_utils.py · 10800-d</small></div>
+    <span class="arrow">→</span>
+    <div class="node process">StandardScaler<br><small>fit train only</small></div>
+    <span class="arrow">→</span>
+    <div class="node process">PCA whiten 368-d<br><small>train_svm.py</small></div>
+  </div>
+  <div class="arch-row">
+    <div class="node process">PCA features</div>
+    <span class="arrow">→</span>
+    <div class="node model">GridSearchCV SVM<br><small>RBF + poly · cv=5</small></div>
+    <span class="arrow">→</span>
+    <div class="node train">CalibratedCV<br><small>FrozenEstimator · Platt · fit on VAL</small></div>
+    <span class="arrow">→</span>
+    <div class="node output">svm_face.pkl + cache</div>
+  </div>
+  <div class="arch-row">
+    <div class="node output">train_cache.npz</div>
+    <span class="arrow">→</span>
+    <div class="node model">Ngưỡng T_p, T_m<br><small>calibrate_thresholds.py</small></div>
+    <span class="arrow">→</span>
+    <div class="node output">thresholds.pkl<br><small>+ per-class boost</small></div>
+  </div>
+  <div class="arch-row" style="margin-top:8px">
+    <div class="node cfg">../config.py (ngoài thư mục)<br><small>cfg.LBP_CROP_ROOT, LBP_MODEL_DIR, LBP_HARD_CLASSES…</small></div>
+    <div class="node cfg">face_recognition_model/<br><small>scaler · pca · le · svm · thresholds · cache · cm.png · histograms.png</small></div>
+  </div>
+</div>
+</div>
+
+<h2>Luồng thực thi (3 entry-point thủ công, tuần tự)</h2>
+<div class="pipeline">
+  <div class="pstep">
+    <span class="num">B1</span>
+    <h4>Crop &amp; Align</h4>
+    <div class="file">python mtcnn_finetuned_crop.py</div>
+    <p>Duyệt <code>SPLIT_ROOT/{train,val,test}/&lt;class&gt;</code>, load weights fine-tuned cho 3 mạng PNet/RNet/ONet (<code>strict=False</code>), detect → lấy mắt làm landmark → warp affine ra 128×128 → tùy chọn mask oval → lưu <code>.jpg</code> sang <code>CROP_ROOT</code>. Failure: bad_read · too_small · no_face · low_conf · bad_crop.</p>
+  </div>
+  <div class="pstep">
+    <span class="num">B2</span>
+    <h4>Trích đặc trưng &amp; train SVM</h4>
+    <div class="file">python train_svm.py</div>
+    <p>Đọc 3 split, augment ×5 <b>chỉ train</b> (gốc, flip, brightness ±, noise ±18), tính 10800-d, fit Scaler &amp; PCA <b>chỉ trên train</b>, GridSearchCV (RBF + poly, cv=5), calibrate Platt sigmoid trên <b>val</b> với <code>FrozenEstimator</code>, đánh giá test, dump 5 pickle + <code>train_cache.npz</code>.</p>
+  </div>
+  <div class="pstep">
+    <span class="num">B3</span>
+    <h4>Calibrate ngưỡng</h4>
+    <div class="file">python calibrate_thresholds.py</div>
+    <p>Load <code>train_cache.npz</code> + model, tính <code>p_max</code>, <code>margin</code> trên val, đặt T_p &amp; T_m theo percentile có cap/floor, cộng boost theo class, (tùy chọn) scan <code>UNKNOWN_DIR</code> để vẽ TAR/FAR, lưu <code>thresholds.pkl</code>.</p>
+  </div>
+</div>
+
+<h2>Đánh giá tổng quan</h2>
+<div class="grid grid-3">
+  <div class="card green">
+    <h3 style="color:var(--green)">Điểm mạnh</h3>
+    <ul class="clean">
+      <li>Tách <b>train / val / test</b> sạch — augment chỉ trên train, Scaler &amp; PCA fit chỉ trên train.</li>
+      <li><code>FrozenEstimator(svm)</code> giữ SVM cố định khi calibrate trên val → không leakage val → train.</li>
+      <li>Feature design có lý thuyết tốt: LBP đa scale + Sobel-LBP (Zhao 2008), L2-normalize per-cell, CLAHE bù sáng.</li>
+      <li>Mỗi tham số đều có comment giải thích "đã thử / được hạ / được siết …" — dấu vết tinh chỉnh thực nghiệm rõ ràng.</li>
+    </ul>
+  </div>
+  <div class="card orange">
+    <h3 style="color:var(--orange)">Điểm cần lưu ý</h3>
+    <ul class="clean">
+      <li><b>Val làm 3 việc</b>: calibrate Platt + chọn T_p,T_m + tune <code>PER_CLASS_BOOST</code>. Báo cáo trên val sẽ lạc quan hơn deployment.</li>
+      <li>Config bị phân mảnh: <code>mtcnn_finetuned_crop.py</code> dùng <b>path Windows hardcoded</b>; hai script còn lại lại đi qua <code>cfg</code>. Drift risk khi đổi dataset.</li>
+      <li>Augmentation noise gọi <code>np.random.randint</code> mà không <code>np.random.seed</code> — không tái lập 100%.</li>
+      <li>Cache <code>train_cache.npz</code> là kênh phụ giữa B2 ↔ B3: đổi <code>PCA_DIM</code> mà quên rerun → mismatch âm thầm.</li>
+    </ul>
+  </div>
+  <div class="card pink">
+    <h3 style="color:var(--pink)">Khuyết thiếu</h3>
+    <ul class="clean">
+      <li>Không có script <b>inference / webcam / API</b>: phải tự load <code>.pkl</code> bên ngoài. File <code>face_recognition_model/knn.pkl</code> là artifact mồ côi.</li>
+      <li>Không có <code>requirements.txt</code>, <code>README.md</code>. Trong khi đó <code>sklearn.frozen.FrozenEstimator</code> đòi <b>scikit-learn ≥ 1.6</b>.</li>
+      <li>Không có script standalone để đánh giá lại trên test (evaluate chỉ nằm trong <code>train_svm.py</code>).</li>
+      <li>Không kiểm tra rò rỉ <b>theo subject</b> (cùng người ở cả train &amp; test). Với face dataset đây là rủi ro thường gặp.</li>
+    </ul>
+  </div>
+</div>
+
+</section>
+
+<!-- ───────────── MODEL & TRAINING ───────────── -->
+<section class="panel" id="model">
+<h2>Model &amp; Training Dashboard</h2>
+
+<div class="grid grid-2">
+  <div class="card ai">
+    <h3>Detector — MTCNN fine-tuned</h3>
+    <div class="kpi"><b>3-stage cascade</b><span>P-Net → R-Net → O-Net</span></div>
+    <table>
+      <tr><th>Thresholds</th><td><code>[0.5, 0.6, 0.70]</code> (nới từ <code>[0.7,0.8,0.9]</code>)</td></tr>
+      <tr><th>min_face_size</th><td><code>15</code> (DET_MIN_SIZE, hạ từ 20)</td></tr>
+      <tr><th>CONF_THR</th><td><code>0.60</code> (hạ từ 0.80 để bắt thêm khuôn mặt)</td></tr>
+      <tr><th>Weight load</th><td><code>load_state_dict(..., strict=False)</code> — bỏ qua <code>softmax4_1</code> không có trong checkpoint</td></tr>
+      <tr><th>Device</th><td><code>"cuda" if torch.cuda.is_available() else "cpu"</code></td></tr>
+    </table>
+  </div>
+
+  <div class="card ai">
+    <h3>Classifier — SVM (calibrated)</h3>
+    <div class="kpi"><b>SVC</b><span>probability=False · class_weight tùy biến</span></div>
+    <table>
+      <tr><th>GridSearchCV</th><td>RBF 6×7 = 42 + Poly 2×3×3×2 = 36 → <b>78 combos × cv=5 = 390 fit</b></td></tr>
+      <tr><th>C / γ (RBF)</th><td>C ∈ {0.1, 1, 10, 50, 100, 500}; γ ∈ {scale, auto, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2}</td></tr>
+      <tr><th>Poly</th><td>degree ∈ {2,3}; C ∈ {1,10,100}; γ ∈ {scale, 1e-3, 1e-2}; coef0 ∈ {0,1}</td></tr>
+      <tr><th>Class weight</th><td>HARD_CLASSES (từ cfg) × <code>HARD_WEIGHT=2.0</code></td></tr>
+      <tr><th>Hard-neg mining</th><td>tắt mặc định (<code>HARD_NEGATIVE_MINING=False</code>) — dataset balanced</td></tr>
+      <tr><th>Calibration</th><td><code>CalibratedClassifierCV(FrozenEstimator(svm), method="sigmoid")</code> fit trên X_val_p (val không augment)</td></tr>
+      <tr><th>N_JOBS</th><td><code>max(1, os.cpu_count() - 6)</code></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card ai">
+    <h3>Feature pipeline — vector 10 800-d</h3>
+    <p>Trên ảnh xám 128×128 sau CLAHE (clipLimit=2.0, tile 8×8), trượt cell 16×16 với step 8 — sinh ra <b>15 × 15 = 225 cell</b> chồng lấn 50%. Mỗi cell có 4 histogram (LBP đa scale + Sobel-LBP x/y), L2-normalize per-cell.</p>
+    <table>
+      <tr><th>Block</th><th>Bins × cell</th><th>Tổng</th></tr>
+      <tr><td>LBP P=8, R=1 (uniform)</td><td>10</td><td>2 250</td></tr>
+      <tr><td>LBP P=16, R=2 (uniform)</td><td>18</td><td>4 050</td></tr>
+      <tr><td>Sobel-LBP_x (CV_16S → LBP P=8 R=1)</td><td>10</td><td>2 250</td></tr>
+      <tr><td>Sobel-LBP_y (CV_16S → LBP P=8 R=1)</td><td>10</td><td>2 250</td></tr>
+      <tr><td colspan="2"><b>Tổng</b></td><td><b>10 800</b></td></tr>
+    </table>
+    <p style="color:var(--muted);font-size:12px">Lưu ý: comment ở <code>feature_utils.py</code> ghi "Grid 8×8" nhưng thực tế 225 cell — comment cần cập nhật.</p>
+  </div>
+
+  <div class="card ai">
+    <h3>Open-set rejection</h3>
+    <p>Hai tín hiệu được tính trên xác suất do SVM trả về (sau Platt):</p>
+    <ul class="clean">
+      <li><code>p_max</code> = xác suất lớp top-1</li>
+      <li><code>margin</code> = p_max − p_top-2</li>
+    </ul>
+    <table>
+      <tr><th>T_p (global)</th><td><code>max(min(percentile(p_max,3), 0.92), 0.63)</code></td></tr>
+      <tr><th>T_m</th><td><code>min(percentile(margin,5), 0.80)</code></td></tr>
+      <tr><th>Quy tắc</th><td><b>AND</b>: <code>p_max ≥ T_p_per_class &amp;&amp; margin ≥ T_m</code></td></tr>
+      <tr><th>Per-class boost</th><td>Dan +0.11 · Vi +0.11 · Triet +0.012 · Tri +0.026 (Tuan commented out)</td></tr>
+      <tr><th>Cap / floor</th><td><b>cap 0.92</b> tránh quá nghiêm khi val đẹp · <b>floor 0.63</b> chặn unknown confident</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="card ai">
+  <h3>Reproducibility — <span class="repro med">Medium</span></h3>
+  <ul class="clean">
+    <li>✅ <code>RANDOM_STATE = 42</code> được truyền vào <code>SVC</code>, <code>PCA</code>, và <code>random.Random(42)</code> ở chọn debug-samples.</li>
+    <li>⚠️ Không <code>torch.manual_seed(42)</code> → MTCNN có thành phần ngẫu nhiên không kiểm soát.</li>
+    <li>⚠️ Không <code>np.random.seed(...)</code> globally → <code>np.random.randint(-18, 18, ...)</code> trong augment khác nhau mỗi lần chạy.</li>
+    <li>⚠️ Không có <code>requirements.txt</code> hay version pin (sklearn ≥ 1.6 là điều kiện ngầm).</li>
+  </ul>
+</div>
+
+<div class="card ai">
+  <h3>Lý do từng lựa chọn config (vì sao chốt như vậy)</h3>
+  <table>
+    <tr><th>Tham số</th><th>Giá trị</th><th>Lý do (theo comment trong code)</th></tr>
+    <tr><td>OUTPUT_SIZE</td><td><span class="val">(128,128)</span></td><td>Hạ từ (160,160) để crop siết hơn, bớt background — phù hợp với pipeline LBP cần ít noise nền.</td></tr>
+    <tr><td>EYE_DIST_RATIO</td><td><span class="val">0.42</span></td><td>Tăng từ 0.32 → mặt to hơn ~31%, bớt background. Cùng giá trị ở 2 file (crop &amp; calibrate).</td></tr>
+    <tr><td>EYE_Y_RATIO</td><td><span class="val">0.40</span></td><td>Tăng từ 0.38 → bớt phần trán/tóc trong khung.</td></tr>
+    <tr><td>MIN_VALID</td><td><span class="val">0.55</span></td><td>Siết từ 0.50 — bỏ crop nếu warp ra ngoài biên ảnh gốc &gt; 45%.</td></tr>
+    <tr><td>CONF_THR (MTCNN)</td><td><span class="val">0.60</span></td><td>Hạ từ 0.80 để "bắt thêm 1 ảnh no_face" — chấp nhận đánh đổi độ tin cậy detect lấy recall.</td></tr>
+    <tr><td>thresholds (cascade)</td><td><span class="val">[0.5, 0.6, 0.70]</span></td><td>Nới từ default [0.7, 0.8, 0.9] để bắt mặt nhỏ / ánh sáng yếu.</td></tr>
+    <tr><td>MASK_BG_VALUE</td><td><span class="val">128</span></td><td>Mid-gray: LBP/Sobel ít nhiễu, đồng nhất giữa các ảnh — nhưng <code>USE_OVAL_MASK=False</code> đang tắt để thử SVM tự học ranh giới mặt.</td></tr>
+    <tr><td>CELL / STEP</td><td><span class="val">16 / 8</span></td><td>Overlap 50% → 15×15 = 225 cell, đủ mịn để giữ thông tin spatial mà không bùng nổ chiều.</td></tr>
+    <tr><td>CV_16S (Sobel)</td><td><span class="val">signed int16</span></td><td>Để LBP nhận gradient âm/dương không bị skimage warn khi tính trên float.</td></tr>
+    <tr><td>PCA_DIM</td><td><span class="val">368</span></td><td>Chọn thủ công sau khi script in ra ngưỡng 70/80/90/95% variance. <i>(Comment không nêu rõ tỉ lệ giữ lại — đoạn 175–184 in ra nhưng không tự chọn.)</i></td></tr>
+    <tr><td>whiten=True</td><td><span class="val">PCA</span></td><td>Chuẩn hóa eigenvector về cov = I — RBF SVM phụ thuộc khoảng cách Euclidean nên whitening giúp γ ổn định.</td></tr>
+    <tr><td>probability=False</td><td><span class="val">SVC</span></td><td>Tránh nội-Platt 5-fold trong mỗi fit của GridSearchCV (đắt) — calibrate riêng 1 lần ở cuối bằng <code>FrozenEstimator</code> trên val.</td></tr>
+    <tr><td>FrozenEstimator</td><td><span class="val">wrap SVM</span></td><td>Khóa SVM đã train, chỉ học sigmoid Platt trên val — không retrain SVM với folds val/train.</td></tr>
+    <tr><td>T_p floor 0.63 / cap 0.92</td><td><span class="val">open-set</span></td><td>Floor chặn unknown confident sai (p_max ≥ 0.5 vẫn có thể là unknown nếu margin nhỏ). Cap tránh percentile-3 trên val đã quá cao (≥ 0.92) khiến hệ thống quá nghiêm trên test.</td></tr>
+    <tr><td>PER_CLASS_BOOST</td><td><span class="val">{Dan:+0.11, Vi:+0.11, Triet:+0.012, Tri:+0.026}</span></td><td>Dan &amp; Vi là "unknown attractor" — hay bị nhầm với người lạ; cộng thêm 0.11 vào T_p của hai lớp này để siết. Triet/Tri được điều chỉnh nhẹ.</td></tr>
+  </table>
+</div>
+
+</section>
+
+<!-- ───────────── CONFIG ───────────── -->
+<section class="panel" id="config">
+<h2>Bảng cấu hình đầy đủ</h2>
+<p class="sub">Mỗi tham số kèm vị trí trong source, kiểu, và ghi chú. Cột <i>Sensitivity</i> đánh dấu mức độ ảnh hưởng tới chất lượng — không phải tới sự ổn định khi chạy.</p>
+
+<h3>feature_utils.py — Feature config</h3>
+<table>
+  <tr><th>Tham số</th><th>Giá trị</th><th>Loc</th><th>Sensitivity</th><th>Ghi chú</th></tr>
+  <tr><td>IMG_SIZE</td><td><span class="val">(128,128)</span></td><td class="loc">L12</td><td class="imp-high">🔴 high</td><td>Phải khớp với output crop của MTCNN; thay đổi sẽ thay đổi số cell và dim.</td></tr>
+  <tr><td>CELL</td><td><span class="val">16</span></td><td class="loc">L13</td><td class="imp-high">🔴 high</td><td>Kích thước cell LBP histogram.</td></tr>
+  <tr><td>STEP</td><td><span class="val">8</span></td><td class="loc">L14</td><td class="imp-high">🔴 high</td><td>Step → overlap 50% → 15×15 = 225 cell.</td></tr>
+  <tr><td>LBP_BIN_R1</td><td><span class="val">10</span></td><td class="loc">L15</td><td class="imp-med">🟡 med</td><td>Uniform LBP P=8 → 0..9.</td></tr>
+  <tr><td>LBP_BIN_R2</td><td><span class="val">18</span></td><td class="loc">L16</td><td class="imp-med">🟡 med</td><td>Uniform LBP P=16 → 0..17.</td></tr>
+  <tr><td>CLAHE clipLimit</td><td><span class="val">2.0</span></td><td class="loc">L19</td><td class="imp-med">🟡 med</td><td>Bù sáng cục bộ trước LBP.</td></tr>
+  <tr><td>CLAHE tileGridSize</td><td><span class="val">(8,8)</span></td><td class="loc">L19</td><td class="imp-low">🟢 low</td><td>Cùng grid spatial của hist trên 128×128.</td></tr>
+</table>
+
+<h3>mtcnn_finetuned_crop.py — Detect / Align</h3>
+<table>
+  <tr><th>Tham số</th><th>Giá trị</th><th>Loc</th><th>Sensitivity</th><th>Ghi chú</th></tr>
+  <tr><td>SPLIT_ROOT</td><td><span class="val">r"C:\…\Dataset Split Filtered"</span></td><td class="loc">L17</td><td class="imp-high">🔴 high</td><td><b>Hardcoded</b> — không qua <code>cfg</code>. Inconsistency với 2 file còn lại.</td></tr>
+  <tr><td>CROP_ROOT</td><td><span class="val">r"C:\…\..._crop_finetuned_masked"</span></td><td class="loc">L18</td><td class="imp-high">🔴 high</td><td>Hardcoded.</td></tr>
+  <tr><td>WEIGHTS_DIR</td><td><span class="val">r"C:\…\mtcnn_finetune\weights"</span></td><td class="loc">L19</td><td class="imp-high">🔴 high</td><td>Hardcoded.</td></tr>
+  <tr><td>OUTPUT_SIZE</td><td><span class="val">(128,128)</span></td><td class="loc">L20</td><td class="imp-high">🔴 high</td><td>Hạ từ (160,160) — phải khớp IMG_SIZE.</td></tr>
+  <tr><td>CONF_THR</td><td><span class="val">0.60</span></td><td class="loc">L23</td><td class="imp-med">🟡 med</td><td>Hạ từ 0.80.</td></tr>
+  <tr><td>MIN_FACE_PX</td><td><span class="val">30</span></td><td class="loc">L24</td><td class="imp-low">🟢 low</td><td>Hạ từ 40.</td></tr>
+  <tr><td>DET_MIN_SIZE</td><td><span class="val">15</span></td><td class="loc">L25</td><td class="imp-med">🟡 med</td><td>Hạ từ 20 — detect mặt nhỏ hơn.</td></tr>
+  <tr><td>thresholds (cascade)</td><td><span class="val">[0.5,0.6,0.70]</span></td><td class="loc">L72</td><td class="imp-med">🟡 med</td><td>Nới từ default [0.7,0.8,0.9].</td></tr>
+  <tr><td>EYE_DIST_RATIO</td><td><span class="val">0.42</span></td><td class="loc">L28</td><td class="imp-high">🔴 high</td><td>Tăng từ 0.32 — mặt to hơn ~31%.</td></tr>
+  <tr><td>EYE_Y_RATIO</td><td><span class="val">0.40</span></td><td class="loc">L29</td><td class="imp-med">🟡 med</td><td>Tăng từ 0.38 — bớt trán/tóc.</td></tr>
+  <tr><td>MIN_VALID</td><td><span class="val">0.55</span></td><td class="loc">L30</td><td class="imp-med">🟡 med</td><td>Siết từ 0.50.</td></tr>
+  <tr><td>MASK_BG_VALUE</td><td><span class="val">128</span></td><td class="loc">L34</td><td class="imp-low">🟢 low</td><td>Mid-gray, LBP/Sobel ít nhiễu.</td></tr>
+  <tr><td>MASK_FEATHER / RX / RY / CY</td><td><span class="val">10 / 0.42 / 0.55 / 0.55</span></td><td class="loc">L35–38</td><td class="imp-low">🟢 low</td><td>Hình oval mềm.</td></tr>
+  <tr><td>USE_OVAL_MASK</td><td><span class="val">False</span></td><td class="loc">L39</td><td class="imp-med">🟡 med</td><td>Đang tắt — thử SVM tự học ranh giới mặt.</td></tr>
+  <tr><td>SKIP_EXISTING</td><td><span class="val">False</span></td><td class="loc">L31</td><td class="imp-low">🟢 low</td><td>Tạm tắt để chạy lại toàn bộ.</td></tr>
+  <tr><td>SAVE_DEBUG_SAMPLES</td><td><span class="val">30</span></td><td class="loc">L42</td><td class="imp-low">🟢 low</td><td>Random 30 ảnh ra <code>_debug_samples/</code>.</td></tr>
+</table>
+
+<h3>train_svm.py — Train</h3>
+<table>
+  <tr><th>Tham số</th><th>Giá trị</th><th>Loc</th><th>Sensitivity</th><th>Ghi chú</th></tr>
+  <tr><td>RANDOM_STATE</td><td><span class="val">42</span></td><td class="loc">L33</td><td class="imp-med">🟡 med</td><td>Truyền cho SVC, PCA.</td></tr>
+  <tr><td>PCA_DIM</td><td><span class="val">368</span></td><td class="loc">L34</td><td class="imp-high">🔴 high</td><td>Chọn thủ công sau khi in variance retention 70/80/90/95%.</td></tr>
+  <tr><td>HARD_WEIGHT</td><td><span class="val">2.0</span></td><td class="loc">L38</td><td class="imp-med">🟡 med</td><td>Boost class_weight cho HARD_CLASSES.</td></tr>
+  <tr><td>HARD_NEGATIVE_MINING</td><td><span class="val">False</span></td><td class="loc">L41</td><td class="imp-low">🟢 low</td><td>Tắt cho dataset balanced.</td></tr>
+  <tr><td>augment variants</td><td><span class="val">5 (orig, hflip, α=1.3 β=20, α=0.7 β=−20, noise ±18)</span></td><td class="loc">L51–60</td><td class="imp-high">🔴 high</td><td>Chỉ áp dụng train. Bỏ rotation/perspective/blur do "controlled condition".</td></tr>
+  <tr><td>PCA whiten</td><td><span class="val">True</span></td><td class="loc">L188</td><td class="imp-high">🔴 high</td><td>Tốt cho RBF SVM.</td></tr>
+  <tr><td>SVC probability</td><td><span class="val">False</span></td><td class="loc">L116</td><td class="imp-med">🟡 med</td><td>Calibrate riêng sau, không bật trong GridSearch (đắt).</td></tr>
+  <tr><td>GridSearch param_grid</td><td><span class="val">RBF 42 + Poly 36 = 78 combos</span></td><td class="loc">L100–113</td><td class="imp-high">🔴 high</td><td>×5-fold = 390 fit. Có thể chạy nhiều phút–giờ.</td></tr>
+  <tr><td>CV folds</td><td><span class="val">5</span></td><td class="loc">L118</td><td class="imp-med">🟡 med</td><td></td></tr>
+  <tr><td>N_JOBS</td><td><span class="val">max(1, cpu_count()-6)</span></td><td class="loc">L98</td><td class="imp-med">🟡 med</td><td>Để lại 6 core cho hệ thống; máy ≤ 8 core sẽ rất chậm.</td></tr>
+  <tr><td>Calibration method</td><td><span class="val">"sigmoid" (Platt)</span></td><td class="loc">L215</td><td class="imp-med">🟡 med</td><td>Trên <b>val</b>, qua <code>FrozenEstimator</code>.</td></tr>
+</table>
+
+<h3>calibrate_thresholds.py — Threshold</h3>
+<table>
+  <tr><th>Tham số</th><th>Giá trị</th><th>Loc</th><th>Sensitivity</th><th>Ghi chú</th></tr>
+  <tr><td>EYE_DIST_RATIO / EYE_Y_RATIO / MIN_VALID / OUT_SIZE / CONF_THR / MIN_FACE_PX</td><td><span class="val">0.42 / 0.40 / 0.55 / (128,128) / 0.60 / 30</span></td><td class="loc">L26–33</td><td class="imp-med">🟡 med</td><td><b>Trùng lặp với mtcnn_finetuned_crop.py</b> — drift risk nếu chỉ sửa 1 nơi.</td></tr>
+  <tr><td>N_SCAN / N_TARGET</td><td><span class="val">500 / 300</span></td><td class="loc">L22–23</td><td class="imp-low">🟢 low</td><td>Số ảnh quét và số sample mục tiêu cho UNKNOWN_DIR.</td></tr>
+  <tr><td>T_p formula</td><td><span class="val">max(min(pct(p_max,3),0.92),0.63)</span></td><td class="loc">L73</td><td class="imp-high">🔴 high</td><td>Cap 0.92 + floor 0.63.</td></tr>
+  <tr><td>T_m formula</td><td><span class="val">min(pct(margin,5),0.80)</span></td><td class="loc">L74</td><td class="imp-high">🔴 high</td><td>Cap 0.80.</td></tr>
+  <tr><td>rule</td><td><span class="val">"AND"</span></td><td class="loc">L75</td><td class="imp-med">🟡 med</td><td>Cả p_max và margin phải qua ngưỡng.</td></tr>
+  <tr><td>PER_CLASS_BOOST</td><td><span class="val">{Dan:0.11, Vi:0.11, Triet:0.012, Tri:0.026}</span></td><td class="loc">L51–57</td><td class="imp-high">🔴 high</td><td>Hardcoded trong file — cần move sang <code>config.py</code>.</td></tr>
+</table>
+
+<h3>External — ../config.py (ngoài thư mục, không đọc trực tiếp)</h3>
+<table>
+  <tr><th>Attribute</th><th>Dùng ở</th><th>Ghi chú</th></tr>
+  <tr><td><code>cfg.LBP_CROP_ROOT</code></td><td>train_svm.py L31</td><td>Phải trỏ cùng folder mà <code>mtcnn_finetuned_crop.py</code> ghi ra.</td></tr>
+  <tr><td><code>cfg.LBP_MODEL_DIR</code></td><td>train_svm L32 · calibrate L19</td><td>Nơi lưu/đọc 5 pkl + cache.</td></tr>
+  <tr><td><code>cfg.LBP_HARD_CLASSES</code></td><td>train_svm L37</td><td>List class boost.</td></tr>
+  <tr><td><code>cfg.LBP_UNKNOWN_DIR</code></td><td>calibrate L20</td><td>Folder ảnh unknown để vẽ FAR (tùy chọn).</td></tr>
+  <tr><td><code>cfg.LBP_WEIGHTS_DIR</code></td><td>calibrate L21</td><td>MTCNN fine-tuned weights cho lần scan unknown.</td></tr>
+</table>
+
+</section>
+
+<!-- ───────────── DEPENDENCIES ───────────── -->
+<section class="panel" id="deps">
+<h2>Phụ thuộc &amp; môi trường</h2>
+<div class="card">
+  <p>Không có <code>requirements.txt</code> trong thư mục. Tổng hợp từ <code>import</code>:</p>
+  <table>
+    <tr><th>Library</th><th>Vai trò</th><th>Mức quan trọng</th></tr>
+    <tr><td><b>scikit-learn ≥ 1.6</b></td><td>SVC · GridSearchCV · PCA · StandardScaler · LabelEncoder · CalibratedClassifierCV · <code>FrozenEstimator</code> · classification_report · confusion_matrix</td><td class="imp-high">🔴 critical — <code>sklearn.frozen</code> chỉ có từ 1.6</td></tr>
+    <tr><td><b>facenet-pytorch</b></td><td>MTCNN (P/R/O-Net) detector + landmarks</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>torch</b></td><td>backend cho facenet-pytorch · device chọn cuda nếu có</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>opencv-python (cv2)</b></td><td>CLAHE · Sobel · resize · warpAffine · ellipse mask · imread/imwrite</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>scikit-image</b></td><td><code>local_binary_pattern</code> uniform</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>numpy</b></td><td>array ops</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>joblib</b></td><td>dump/load pickle cho model artifacts</td><td class="imp-high">🔴 critical</td></tr>
+    <tr><td><b>tqdm</b></td><td>progress bar</td><td class="imp-low">🟢 optional</td></tr>
+    <tr><td><b>matplotlib + seaborn</b></td><td>confusion matrix · histograms</td><td class="imp-low">🟢 optional khi inference</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Compute</h3>
+  <ul class="clean">
+    <li>MTCNN chạy GPU nếu có (<code>DEVICE = "cuda" if torch.cuda.is_available() else "cpu"</code>) — tốt cho B1 (crop) và phần scan unknown ở B3.</li>
+    <li>SVM &amp; GridSearchCV là CPU-bound, <code>n_jobs = max(1, cpu_count()-6)</code>. Máy 8 core sẽ chỉ dùng 2 core — chuyển sang <code>-1</code> hoặc <code>cpu_count()-2</code> nếu cần nhanh.</li>
+    <li>Bộ nhớ peak chủ yếu ở GridSearchCV và <code>train_cache.npz</code> (X_train_p ×5, X_val_p, X_test_p ở float64 mặc định sau PCA).</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Hồ sơ artifact <code>face_recognition_model/</code></h3>
+  <table>
+    <tr><th>File</th><th>Vai trò</th></tr>
+    <tr><td><code>svm_face.pkl</code></td><td>CalibratedClassifierCV wrap SVC (đầu ra cuối).</td></tr>
+    <tr><td><code>scaler.pkl</code></td><td>StandardScaler fit trên train.</td></tr>
+    <tr><td><code>pca.pkl</code></td><td>PCA whiten 368-d.</td></tr>
+    <tr><td><code>label_encoder.pkl</code></td><td>LabelEncoder.</td></tr>
+    <tr><td><code>thresholds.pkl</code></td><td>T_p, T_m, rule, T_p_per_class.</td></tr>
+    <tr><td><code>train_cache.npz</code></td><td>X_train_p / X_val_p, y_val / X_test_p, y_test — kênh phụ giữa B2 ↔ B3.</td></tr>
+    <tr><td><code>confusion_matrix.png</code> · <code>threshold_histograms.png</code> · <code>threshold_2d_scatter.png</code></td><td>Hình minh hoạ.</td></tr>
+    <tr><td><code>knn.pkl</code></td><td><b>Mồ côi</b> — không có code training cho file này trong folder. Có thể là artifact baseline cũ cần xoá.</td></tr>
+  </table>
+</div>
+</section>
+
+<!-- ───────────── CONSENSUS ───────────── -->
+<section class="panel" id="consensus">
+<h2>Đồng thuận của 5 nhà phân tích</h2>
+
+<div class="card green">
+  <h3 style="color:var(--green)">Nơi tất cả thống nhất</h3>
+  <ul class="clean">
+    <li>Pipeline tách rõ giai đoạn detect → feature → train → calibrate. Đường ranh giới giữa train / val / test được tôn trọng (augment chỉ trên train; Scaler &amp; PCA fit chỉ trên train).</li>
+    <li><code>CalibratedClassifierCV(FrozenEstimator(svm))</code> trên val là chốt chống leakage quan trọng — SVM không bị retrain bằng val/test.</li>
+    <li>Feature design (LBP đa scale + Sobel-LBP + L2 per-cell + CLAHE) là một lựa chọn cổ điển có cơ sở (Zhao 2008, Ahonen 2006).</li>
+    <li>Mỗi tham số trong code đều có comment giải thích lịch sử tinh chỉnh — đây là dấu hiệu của một process thực nghiệm có theo dõi.</li>
+  </ul>
+</div>
+
+<div class="card orange">
+  <h3 style="color:var(--orange)">Surprises &amp; hidden complexity</h3>
+  <ul class="clean">
+    <li><b>Hardcoded paths Windows</b> chỉ tồn tại trong <code>mtcnn_finetuned_crop.py</code>, trong khi hai script còn lại đi qua <code>cfg</code> — nếu user đổi <code>config.py</code>, B1 sẽ vẫn ghi vào folder cũ.</li>
+    <li><code>PCA_DIM = 368</code> được hardcoded; script <i>có</i> in ra số chiều ứng với 70/80/90/95% variance (dòng 175–184) <i>nhưng không dùng kết quả</i> để chọn — phân tích bị bỏ trống.</li>
+    <li><code>train_cache.npz</code> là kênh phụ trạng thái: đổi <code>PCA_DIM</code> hoặc augment mà quên rerun B2 → <code>calibrate_thresholds.py</code> đọc cache cũ → ngưỡng sai lệch âm thầm.</li>
+    <li>Header docstring của <code>feature_utils.py</code> ghi "Grid 8×8" trong khi thực tế là 15×15 = 225 cell. Comment cần cập nhật.</li>
+    <li><code>PyTorch</code> bị kéo theo chỉ để chạy MTCNN; SVM/SVM-calibration thuần CPU. Đây là chi phí phụ thuộc đáng kể cho 1 hàm.</li>
+  </ul>
+</div>
+
+<div class="card pink">
+  <h3 style="color:var(--pink)">Blind spots — phát hiện qua cross-review</h3>
+  <ul class="clean">
+    <li><b>Val đảm nhận 3 vai trò</b>: (1) fit Platt sigmoid, (2) chọn T_p / T_m theo percentile, (3) tune <code>PER_CLASS_BOOST</code>. Báo cáo trên val do đó sẽ lạc quan hơn deployment. Test set có được giữ thật sự sạch không thì phụ thuộc vào việc bạn chỉ <code>cal_svm.score(X_test_p, y_test)</code> 1 lần — không lặp lại sau khi đổi boost.</li>
+    <li><b>Identity leakage</b>: với face dataset, nếu split <code>train/val/test</code> được tạo ngẫu nhiên theo ảnh thì cùng 1 người có thể xuất hiện ở cả 3 tập. Không có đoạn code nào ép split theo subject/session — cần kiểm tra ở tầng dataset.</li>
+    <li><b>Platt sigmoid</b> cần đủ mẫu mỗi lớp để ổn định (rule of thumb ≥ 50/class). Với dataset nhỏ &amp; nhiều class, nên cân nhắc isotonic regression hoặc cross-val Platt.</li>
+    <li><b>Scaler/PCA fit trên train đã augment</b>: noise/brightness shift sẽ thấm vào mean/var của Scaler và basis của PCA — về nguyên tắc nên fit Scaler/PCA trên ảnh gốc (chưa augment), rồi mới augment trong feature space sau, hoặc chấp nhận thiên lệch nhỏ này.</li>
+    <li>Không có <code>torch.manual_seed</code> + <code>np.random.seed</code> chung — augmentation noise (<code>np.random.randint</code>) khác giữa các lần chạy.</li>
+    <li>Không có script đánh giá trên slice (per-class, per-condition) ngoài <code>classification_report</code> trong train. Cũng không có monitoring/drift cho ngưỡng open-set khi deploy.</li>
+    <li>(Một analyst đã đoán sai rằng <code>EYE_DIST_RATIO</code> ở 2 file khác nhau — kiểm tra lại cho thấy <b>cả hai đều là 0.42</b>. Bịa số không nên đi vào report cuối; vẫn để lại đây như một bài học rằng config trùng lặp giữa 2 file <b>đang khớp ở thời điểm này</b>, nhưng vẫn là drift risk.)</li>
+  </ul>
+</div>
+
+<div class="card blue">
+  <h3 style="color:var(--blue)">Khuyến nghị ưu tiên</h3>
+  <ol>
+    <li><b>Đưa toàn bộ config về <code>config.py</code></b>: <code>SPLIT_ROOT</code>, <code>CROP_ROOT</code>, <code>WEIGHTS_DIR</code>, các align param, <code>PCA_DIM</code>, <code>PER_CLASS_BOOST</code>, T_p cap/floor. Mọi script đọc từ một nguồn duy nhất.</li>
+    <li>Thêm <code>requirements.txt</code> với <code>scikit-learn>=1.6</code>, <code>facenet-pytorch</code>, <code>opencv-python</code>, <code>scikit-image</code>, <code>torch</code>, <code>joblib</code>, <code>matplotlib</code>, <code>seaborn</code>, <code>tqdm</code> + một <code>README.md</code> ghi rõ thứ tự B1 → B2 → B3.</li>
+    <li>Viết script <code>predict.py</code> / <code>infer_webcam.py</code> dùng cùng pipeline preprocess (chia sẻ hàm với <code>mtcnn_finetuned_crop.py</code>). Đồng thời xoá <code>knn.pkl</code> mồ côi.</li>
+    <li>Set seed toàn cục cho <code>np.random</code> và <code>torch</code>; ghi version hash của artifact vào filename hoặc metadata để chống stale cache.</li>
+    <li>Tách <i>chọn ngưỡng</i> khỏi <i>tune per-class boost</i>: ngưỡng global &amp; boost nên được chốt 1 lần, sau đó không nhìn lại val.</li>
+    <li>Kiểm tra dataset split theo <b>subject</b>: cùng người không được xuất hiện ở cả train &amp; test. Đây là rủi ro lớn nhất với face recognition và nằm ngoài tầm code này.</li>
+    <li>Trong B2, sau khi in variance retention (dòng 175–184), tự động chọn <code>PCA_DIM</code> theo target retention (ví dụ 95%), thay vì hardcode.</li>
+  </ol>
+</div>
+</section>
+
+<!-- ───────────── CODE EXCERPTS ───────────── -->
+<section class="panel" id="code">
+<h2>Trích đoạn code quan trọng</h2>
+
+<details open>
+<summary>Feature extractor — <code>feature_utils.py</code></summary>
+<pre><code>IMG_SIZE   = (128, 128); CELL = 16; STEP = 8
+LBP_BIN_R1 = 10  # P=8 uniform → 0..9
+LBP_BIN_R2 = 18  # P=16 uniform → 0..17
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+def extract_features(img_bgr):
+    resized = cv2.resize(img_bgr, IMG_SIZE)
+    gray    = _clahe.apply(cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY))
+
+    lbp1 = local_binary_pattern(gray, P=8,  R=1, method="uniform")
+    lbp2 = local_binary_pattern(gray, P=16, R=2, method="uniform")
+    f_lbp1 = _spatial_hist(lbp1, bins=LBP_BIN_R1, value_range=(0, LBP_BIN_R1))
+    f_lbp2 = _spatial_hist(lbp2, bins=LBP_BIN_R2, value_range=(0, LBP_BIN_R2))
+
+    # Zhao 2008: LBP trên gradient image (signed int16)
+    sx = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+    sy = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
+    lbp_sx = local_binary_pattern(sx, P=8, R=1, method="uniform")
+    lbp_sy = local_binary_pattern(sy, P=8, R=1, method="uniform")
+    f_slbp_x = _spatial_hist(lbp_sx, bins=LBP_BIN_R1, value_range=(0, LBP_BIN_R1))
+    f_slbp_y = _spatial_hist(lbp_sy, bins=LBP_BIN_R1, value_range=(0, LBP_BIN_R1))
+
+    return np.concatenate([f_lbp1, f_lbp2, f_slbp_x, f_slbp_y]).astype(np.float32)
+</code></pre>
+</details>
+
+<details open>
+<summary>GridSearch + FrozenEstimator calibration — <code>train_svm.py</code></summary>
+<pre><code>param_grid = [
+    {"kernel": ["rbf"],
+     "C":      [0.1, 1, 10, 50, 100, 500],
+     "gamma":  ["scale","auto",1e-4,5e-4,1e-3,5e-3,1e-2]},
+    {"kernel": ["poly"], "degree": [2,3],
+     "C": [1,10,100], "gamma": ["scale",1e-3,1e-2], "coef0": [0,1]},
+]
+grid = GridSearchCV(
+    SVC(probability=False, class_weight=cw, random_state=RANDOM_STATE),
+    param_grid, cv=5, n_jobs=N_JOBS, verbose=1,
+)
+grid.fit(X_train_p, y_train, sample_weight=sample_weight)
+svm = grid.best_estimator_
+
+# Calibrate trên VAL với SVM đã frozen — không retrain SVM
+cal_svm = CalibratedClassifierCV(FrozenEstimator(svm), method="sigmoid")
+cal_svm.fit(X_val_p, y_val)
+</code></pre>
+</details>
+
+<details>
+<summary>Pipeline crop + align — <code>mtcnn_finetuned_crop.py</code></summary>
+<pre><code>def align_and_crop(img_rgb, box, landmarks, out_size=OUTPUT_SIZE):
+    left_eye  = np.float32(landmarks[0])
+    right_eye = np.float32(landmarks[1])
+    dX, dY = right_eye[0]-left_eye[0], right_eye[1]-left_eye[1]
+    eye_center = ((left_eye[0]+right_eye[0])/2, (left_eye[1]+right_eye[1])/2)
+    scale = (EYE_DIST_RATIO * out_size[0]) / (np.sqrt(dX**2+dY**2) + 1e-6)
+    M = cv2.getRotationMatrix2D(eye_center, np.degrees(np.arctan2(dY, dX)), scale)
+    M[0,2] += out_size[0] * 0.50 - eye_center[0]
+    M[1,2] += out_size[1] * EYE_Y_RATIO - eye_center[1]
+
+    mask = cv2.warpAffine(np.ones(img_rgb.shape[:2], np.uint8), M, out_size,
+                          flags=cv2.INTER_NEAREST, borderValue=0)
+    if mask.mean() &lt; MIN_VALID:  # bỏ crop bị cắt ra ngoài biên ảnh gốc
+        return None
+    aligned = cv2.warpAffine(img_rgb, M, out_size,
+                             flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    ...
+</code></pre>
+</details>
+
+<details>
+<summary>Open-set thresholds — <code>calibrate_thresholds.py</code></summary>
+<pre><code>proba_val = svm.predict_proba(X_val_p)
+sp_val    = np.sort(proba_val, axis=1)
+known_p   = sp_val[:, -1]                  # p_max
+known_m   = sp_val[:, -1] - sp_val[:, -2]  # margin top-1 − top-2
+
+# Cap T_p ≤ 0.92, floor T_p ≥ 0.63 → chặn unknown confident
+T_p  = max(float(min(np.percentile(known_p, 3),  0.92)), 0.63)
+T_m  = float(min(np.percentile(known_m, 5),  0.80))
+rule = "AND"
+
+PER_CLASS_BOOST = {"Dan": 0.11, "Vi": 0.11, "Triet": 0.012, "Tri": 0.026}
+T_p_per_class = {cls: round(min(T_p + PER_CLASS_BOOST.get(cls, 0.0), 0.97), 4)
+                 for cls in le.classes_}
+</code></pre>
+</details>
+
+</section>
+
+<footer>
+  Generated by Code Preview Panel · 5 analysts · 3 cross-reviewers · 1 chairman synthesis.<br>
+  Project: <code>C:\Users\diosodumb\Documents\Final_CS231\MTCNN_LBP-SOBELLBP_SVM</code> · Generated 2026-05-18
+</footer>
+
+<script>
+  const tabs = document.querySelectorAll('#tabs .tab');
+  const panels = document.querySelectorAll('.panel');
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.remove('active'));
+    panels.forEach(p => p.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById(t.dataset.t).classList.add('active');
+    window.scrollTo({top:0, behavior:'smooth'});
+  }));
+</script>
+</body>
+</html>
