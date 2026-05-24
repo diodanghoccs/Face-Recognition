@@ -21,6 +21,7 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.decomposition import PCA
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
+from sklearn.covariance import LedoitWolf
 import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -147,7 +148,9 @@ def _train_svm(X_train, y_train, sample_weight, le, label="initial"):
             "coef0":  [0, 1],
         },
     ]
-    cw = _build_class_weight(le) if HARD_CLASSES else None
+    # Mặc định 'balanced' (thay None) để chống Dan/Vi unknown-attractor khi dataset hơi lệch.
+    # Nếu LBP_HARD_CLASSES được set ở config, dùng manual boost (giữ tương thích).
+    cw = _build_class_weight(le) if HARD_CLASSES else "balanced"
     grid = GridSearchCV(
         SVC(probability=False, class_weight=cw, random_state=RANDOM_STATE),
         param_grid,
@@ -272,6 +275,25 @@ def main():
     cal_svm.fit(X_val_cal, y_val_cal)
     print(f"  Calibrated.")
 
+    # ── Mahalanobis stats per class (open-set OOD signal trên PCA-space) ──
+    # Ledoit-Wolf shrinkage để Σ luôn invertible khi n_samples < n_features.
+    # Inference dùng signal này để reject sample rơi vào vùng SVM gán cho 1 class
+    # nhưng nằm xa centroid class đó (OOD nhưng probability cao).
+    print(f"\nComputing per-class Mahalanobis stats (Ledoit-Wolf shrinkage)...")
+    class_stats = {}
+    for c in np.unique(y_train):
+        Xc = X_train_p[y_train == c]
+        mu = Xc.mean(axis=0)
+        lw = LedoitWolf().fit(Xc)
+        cov_inv = np.linalg.pinv(lw.covariance_)
+        class_stats[int(c)] = {
+            "mu":      mu.astype(np.float32),
+            "cov_inv": cov_inv.astype(np.float32),
+            "n":       int(Xc.shape[0]),
+            "shrink":  float(lw.shrinkage_),
+        }
+        print(f"  class {le.classes_[c]:10s}: n={Xc.shape[0]:>4}  shrinkage={lw.shrinkage_:.3f}")
+
     # ── Evaluate ──────────────────────────────────────────────────
     train_acc    = cal_svm.score(X_train_p, y_train)
     val_cal_acc  = cal_svm.score(X_val_cal, y_val_cal)
@@ -310,6 +332,10 @@ def main():
         os.remove(old_lda)
         print(f"Đã xóa {old_lda} (không còn dùng LDA)")
 
+    # ── Lưu class_stats cho Mahalanobis OOD signal ───────────────
+    joblib.dump(class_stats, os.path.join(MODEL_DIR, "class_stats.pkl"))
+    print(f"Saved class_stats.pkl  ({len(class_stats)} classes)")
+
     # ── Lưu cache cho calibrate_thresholds ───────────────────────
     np.savez(os.path.join(MODEL_DIR, "train_cache.npz"),
              X_train_p=X_train_p,
@@ -321,7 +347,7 @@ def main():
 
     # ── Lưu manifest để B3 verify không bị stale-cache ───────────
     manifest = {
-        "schema_version"   : 2,
+        "schema_version"   : 3,
         "created"          : datetime.datetime.now().isoformat(timespec="seconds"),
         "sklearn_version"  : sklearn.__version__,
         "random_state"     : RANDOM_STATE,
@@ -337,6 +363,10 @@ def main():
         "augment_variants" : n_aug,
         "hard_classes"     : sorted(HARD_CLASSES),
         "hard_weight"      : HARD_WEIGHT,
+        "class_weight"     : "balanced" if not HARD_CLASSES else "hard_classes_dict",
+        "has_class_stats"  : True,
+        "class_stats_shrinkage": {le.classes_[c]: round(class_stats[c]["shrink"], 4)
+                                  for c in class_stats},
     }
     manifest["hash"] = _hash_manifest({
         k: v for k, v in manifest.items() if k not in ("created", "hash")

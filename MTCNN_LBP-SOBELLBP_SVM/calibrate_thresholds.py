@@ -48,6 +48,17 @@ RULE            = str(cfg.LBP_RULE)
 PER_CLASS_BOOST = dict(cfg.LBP_PER_CLASS_BOOST)
 PER_CLASS_CAP   = float(cfg.LBP_PER_CLASS_BOOST_MAX)
 
+# ── FAR-driven sweep + Mahalanobis ───────────────────────────
+USE_FAR_SWEEP        = bool(cfg.LBP_USE_FAR_SWEEP)
+FAR_BUDGET           = float(cfg.LBP_FAR_BUDGET)
+FAR_BUDGET_FALLBACK  = float(cfg.LBP_FAR_BUDGET_FALLBACK)
+_TP_LO, _TP_HI, _TP_STEPS    = cfg.LBP_SWEEP_TP_RANGE
+_TM_LO, _TM_HI, _TM_STEPS    = cfg.LBP_SWEEP_TM_RANGE
+_TAU_LO, _TAU_HI, _TAU_STEPS = cfg.LBP_SWEEP_TAU_PCT_RANGE
+T_P_GRID    = np.linspace(_TP_LO,  _TP_HI,  int(_TP_STEPS))
+T_M_GRID    = np.linspace(_TM_LO,  _TM_HI,  int(_TM_STEPS))
+TAU_PCT_GRID = np.linspace(_TAU_LO, _TAU_HI, int(_TAU_STEPS))
+
 # ── Reproducibility ──────────────────────────────────────────
 random.seed(RANDOM_STATE)
 np.random.seed(RANDOM_STATE)
@@ -82,6 +93,71 @@ def _slice_two_signals(svm, X):
     return sp[:, -1], sp[:, -1] - sp[:, -2]
 
 
+def _mahalanobis_per_sample(X, preds, class_stats):
+    """Mahalanobis distance từ mỗi sample tới class mà SVM predict.
+    Open-set signal: predict Dan nhưng x xa Dan centroid → reject."""
+    out = np.zeros(len(X), dtype=np.float64)
+    for c, st in class_stats.items():
+        mask = preds == c
+        if mask.any():
+            diff = X[mask] - st["mu"]
+            out[mask] = np.sqrt(np.einsum("ij,jk,ik->i", diff, st["cov_inv"], diff))
+    return out
+
+
+def _far_sweep(known_p, known_m, known_d, unk_p, unk_m, unk_d, far_budget):
+    """Sweep grid (T_p, T_m, τ_d), trả best record + all records.
+    Pick: max TAR với FAR ≤ far_budget. Fallback nới budget nếu rỗng."""
+    tau_d_grid = np.percentile(known_d, TAU_PCT_GRID)
+    records = []
+    for tp in T_P_GRID:
+        for tm in T_M_GRID:
+            for td in tau_d_grid:
+                tar = ((known_p >= tp) & (known_m >= tm) & (known_d <= td)).mean()
+                if unk_p is not None:
+                    far = ((unk_p >= tp) & (unk_m >= tm) & (unk_d <= td)).mean()
+                else:
+                    far = float("nan")
+                records.append((tp, tm, td, tar, far))
+    records = np.array(records)
+    if unk_p is None:
+        return None, records
+
+    feasible = records[records[:, 4] <= far_budget]
+    if len(feasible) == 0:
+        print(f"  ⚠️  Không có điểm nào FAR ≤ {far_budget*100:.1f}%, "
+              f"nới lên {FAR_BUDGET_FALLBACK*100:.1f}%")
+        feasible = records[records[:, 4] <= FAR_BUDGET_FALLBACK]
+    if len(feasible) == 0:
+        print("  ⚠️  Vẫn rỗng → pick min-FAR")
+        feasible = records[records[:, 4] == records[:, 4].min()]
+    # Sort: TAR desc, FAR asc, tau_d desc
+    feasible = feasible[np.lexsort((-feasible[:, 2], feasible[:, 4], -feasible[:, 3]))]
+    return tuple(feasible[0]), records
+
+
+def _plot_roc(records, best, far_budget, out_path):
+    if records is None or len(records) == 0:
+        return
+    fars, tars = records[:, 4], records[:, 3]
+    valid = ~np.isnan(fars)
+    if not valid.any():
+        return
+    plt.figure(figsize=(7, 5))
+    plt.scatter(fars[valid], tars[valid], s=3, alpha=0.18, color="steelblue",
+                label="All grid points")
+    plt.axvline(far_budget, ls="--", color="gray", label=f"FAR ≤ {far_budget*100:.1f}%")
+    if best is not None:
+        plt.scatter([best[4]], [best[3]], s=120, marker="*", color="red", zorder=5,
+                    label=f"Op point (T_p={best[0]:.2f}, T_m={best[1]:.2f}, τ_d={best[2]:.2f})")
+    plt.xlabel("FAR (Unknown lọt qua)")
+    plt.ylabel("TAR (Known nhận đúng)")
+    plt.title("Open-set sweep — TAR vs FAR")
+    plt.legend(fontsize=8); plt.grid(alpha=0.3)
+    plt.tight_layout(); plt.savefig(out_path, dpi=150); plt.close()
+    print(f"  ROC sweep saved → {out_path}")
+
+
 def main():
     # ── Load model + cache ────────────────────────────────────────
     print("Loading model + cache...")
@@ -89,6 +165,14 @@ def main():
     scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
     pca    = joblib.load(os.path.join(MODEL_DIR, "pca.pkl"))
     le     = joblib.load(os.path.join(MODEL_DIR, "label_encoder.pkl"))
+    # class_stats optional (legacy model có thể chưa có)
+    cs_path = os.path.join(MODEL_DIR, "class_stats.pkl")
+    if os.path.exists(cs_path):
+        class_stats = joblib.load(cs_path)
+        print(f"  Loaded class_stats.pkl ({len(class_stats)} classes) — Mahalanobis enabled")
+    else:
+        class_stats = None
+        print(f"  ⚠️  class_stats.pkl không có — chạy lại train_svm.py để bật Mahalanobis")
 
     _check_manifest(MODEL_DIR, le.classes_)
 
@@ -276,17 +360,73 @@ def main():
     print(f"\n  Histogram saved to {MODEL_DIR}/threshold_histograms.png")
     plt.show()
 
+    # ── FAR-driven sweep (nếu có class_stats + USE_FAR_SWEEP) ────
+    #
+    # Logic: dùng 3 tín hiệu open-set AND-ed (p_max, margin, Mahalanobis),
+    # sweep grid 3D, pick TAR max với FAR ≤ FAR_BUDGET trên val_thresh + unknown set.
+    # Override T_p, T_m, tau_d trong thresholds.pkl.
+    tau_d = None
+    sweep_meta = None
+    if class_stats is not None and USE_FAR_SWEEP:
+        # Mahalanobis trên Known (val_thresh) — predict bằng SVM Frozen + Platt-cal
+        pred_thr_idx = svm.predict_proba(X_val_thr_p).argmax(axis=1)
+        known_d = _mahalanobis_per_sample(X_val_thr_p, pred_thr_idx, class_stats)
+        print(f"\nMahalanobis (val_thresh): min={known_d.min():.2f}  "
+              f"mean={known_d.mean():.2f}  max={known_d.max():.2f}")
+
+        # Mahalanobis trên Unknown
+        if X_unk_p is not None:
+            pred_unk_idx = svm.predict_proba(X_unk_p).argmax(axis=1)
+            unk_d = _mahalanobis_per_sample(X_unk_p, pred_unk_idx, class_stats)
+            print(f"Mahalanobis (unknown):    min={unk_d.min():.2f}  "
+                  f"mean={unk_d.mean():.2f}  max={unk_d.max():.2f}")
+        else:
+            unk_d = None
+
+        print(f"\n🔍 FAR-driven sweep (grid {len(T_P_GRID)}×{len(T_M_GRID)}×{len(TAU_PCT_GRID)} "
+              f"= {len(T_P_GRID)*len(T_M_GRID)*len(TAU_PCT_GRID)} points)...")
+        best, records = _far_sweep(known_p, known_m, known_d,
+                                   unk_p,   unk_m,   unk_d,
+                                   far_budget=FAR_BUDGET)
+        if best is not None:
+            T_p_new, T_m_new, tau_d, tar_best, far_best = best
+            print(f"\n🎯 FAR-sweep operating point:")
+            print(f"   T_p   = {T_p_new:.4f}   (cũ percentile-only: {T_p:.4f})")
+            print(f"   T_m   = {T_m_new:.4f}   (cũ percentile-only: {T_m:.4f})")
+            print(f"   τ_d   = {tau_d:.4f}   (Mahalanobis)")
+            print(f"   → TAR (val_thresh) = {tar_best*100:.1f}%   "
+                  f"FAR = {far_best*100:.2f}%")
+            # Override
+            T_p = float(T_p_new)
+            T_m = float(T_m_new)
+            # Per-class T_p cập nhật cho khớp (giữ boost cũ làm thứ cấp)
+            T_p_per_class = {cls: round(min(T_p + PER_CLASS_BOOST.get(cls, 0.0),
+                                            PER_CLASS_CAP), 4)
+                             for cls in le.classes_}
+            sweep_meta = {
+                "tar_at_op": float(tar_best),
+                "far_at_op": float(far_best) if not np.isnan(far_best) else None,
+                "far_budget": FAR_BUDGET,
+                "grid_size": int(len(records)),
+            }
+            _plot_roc(records, best, FAR_BUDGET,
+                      os.path.join(MODEL_DIR, "roc_sweep.png"))
+        else:
+            print("  Không có Unknown set → bỏ qua FAR sweep, dùng percentile-only.")
+
     # ── Save ──────────────────────────────────────────────────────
     thresholds = {
         "T_p"            : T_p,
         "T_m"            : T_m,
+        "tau_d"          : tau_d,      # None nếu legacy / không có class_stats
         "rule"           : rule,
         "T_p_per_class"  : T_p_per_class,
         "split_mode"     : split_mode,
         "per_class_boost": PER_CLASS_BOOST,
+        "sweep_meta"     : sweep_meta,  # None nếu không chạy sweep
     }
     joblib.dump(thresholds, os.path.join(MODEL_DIR, "thresholds.pkl"))
-    print(f"\nLưu thresholds + per-class T_p -> {MODEL_DIR}")
+    print(f"\nLưu thresholds (T_p, T_m, τ_d, per-class) -> {MODEL_DIR}")
 
 
 if __name__ == "__main__":

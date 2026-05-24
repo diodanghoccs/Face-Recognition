@@ -37,6 +37,11 @@ EYE_Y_RATIO     = float(cfg.LBP_EYE_Y_RATIO)
 MIN_VALID       = float(cfg.LBP_MIN_VALID)
 SKIP_EXISTING   = bool(cfg.LBP_SKIP_EXISTING)
 
+# ── Pose sanity check (open-set: reject profile / heavily tilted) ──
+POSE_CHECK         = bool(cfg.LBP_POSE_CHECK)
+NOSE_OFFSET_MAX    = float(cfg.LBP_NOSE_OFFSET_MAX)
+EYE_Y_ASYM_MAX     = float(cfg.LBP_EYE_Y_ASYM_MAX)
+
 # ── Background oval mask (LBP-friendly) ───────────────────────
 MASK_BG_VALUE   = int(cfg.LBP_MASK_BG_VALUE)
 MASK_FEATHER    = int(cfg.LBP_MASK_FEATHER)
@@ -132,11 +137,30 @@ def load_finetuned_mtcnn():
     return detector
 
 
+def _pose_ok(landmarks, face_h):
+    """Reject profile / heavily tilted faces dựa trên 5 landmark MTCNN.
+    True nếu pose chấp nhận được. Tái dùng ở inference (app.py) qua import."""
+    if not POSE_CHECK:
+        return True
+    left_eye  = np.float32(landmarks[0])
+    right_eye = np.float32(landmarks[1])
+    nose      = np.float32(landmarks[2])
+    eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0
+    eye_dist  = float(np.linalg.norm(right_eye - left_eye))
+    if eye_dist < 1.0 or face_h < 1.0:
+        return False
+    nose_offset = abs(nose[0] - eye_mid_x) / eye_dist
+    eye_y_asym  = abs(left_eye[1] - right_eye[1]) / face_h
+    return (nose_offset <= NOSE_OFFSET_MAX) and (eye_y_asym <= EYE_Y_ASYM_MAX)
+
+
 def align_and_crop(img_rgb, box, landmarks, out_size=OUTPUT_SIZE):
-    """Align và crop mặt, giống pipeline gốc."""
+    """Align và crop mặt, giống pipeline gốc + pose sanity check."""
     x1, y1, x2, y2 = box
     w, h = x2 - x1, y2 - y1
     if w < MIN_FACE_PX or h < MIN_FACE_PX:
+        return None
+    if not _pose_ok(landmarks, h):
         return None
 
     left_eye   = np.float32(landmarks[0])
@@ -192,6 +216,12 @@ def process_frame(img_bgr, out_dir, stem, detector):
 
     crop = align_and_crop(img_rgb, boxes[best_idx], landmarks[best_idx])
     if crop is None:
+        # Phân biệt bad_pose vs bad_crop để biết tỉ lệ reject từng nguyên nhân
+        box = boxes[best_idx]
+        face_h = box[3] - box[1]
+        if (box[2] - box[0]) >= MIN_FACE_PX and face_h >= MIN_FACE_PX \
+           and not _pose_ok(landmarks[best_idx], face_h):
+            return "bad_pose"
         return "bad_crop"
 
     cv2.imwrite(str(dst), crop)
@@ -252,6 +282,7 @@ def main():
             "no_face": "không detect", "low_conf": "confidence thấp",
             "bad_crop": "crop kém (mặt cắt/quá xa)", "too_small": "ảnh nhỏ",
             "bad_read": "lỗi đọc",
+            "bad_pose": "mặt nghiêng quá ngưỡng (nose offset / eye Y asym)",
         }
         for k, v in sorted(grand_skip.items(), key=lambda x: -x[1]):
             print(f"     • {labels.get(k, k)}: {v}")

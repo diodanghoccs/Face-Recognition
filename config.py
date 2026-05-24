@@ -40,10 +40,11 @@ DATA_TEST  = DATASET_ROOT / "test"
 # ★ MTCNN_LBP-SOBELLBP_SVM — train_svm.py & calibrate_thresholds.py
 # ===========================================================================
 
-# Thư mục ảnh đã crop + finetune dùng để train LBP-SVM
-# (có thể giống DATA_TRAIN nếu bạn không crop riêng)
-LBP_CROP_ROOT = DATA_TRAIN
-# Nếu bạn có thư mục crop riêng, uncomment:
+# Thư mục ảnh đã crop + align — đầu ra của mtcnn_finetuned_crop.py,
+# đầu vào của train_svm.py.  PHẢI KHÁC LBP_DATASET_ROOT, nếu không
+# crop sẽ ghi đè cấu trúc dataset → vỡ label encoding.
+LBP_CROP_ROOT = ROOT / "data" / "Dataset_crop_finetuned_masked"
+# Nếu bạn có thư mục crop riêng ngoài repo, uncomment:
 # LBP_CROP_ROOT = Path(r"C:\Users\<tên>\Pictures\Dataset Face Reg_crop_finetuned_masked")
 
 # Thư mục lưu model sau khi train (mặc định lưu trong repo)
@@ -87,6 +88,13 @@ LBP_USE_OVAL_MASK       = False        # bật để xoá background
 LBP_SKIP_EXISTING       = False        # bỏ qua ảnh đã crop trước
 LBP_SAVE_DEBUG_SAMPLES  = 30           # số ảnh random copy sang _debug_samples/
 
+# Pose sanity check (open-set: reject mặt nghiêng quá ngưỡng).
+# Áp cho cả crop dataset (training) lẫn inference.
+LBP_POSE_CHECK          = True
+LBP_NOSE_OFFSET_MAX     = 0.35         # |nose.x - eye_mid_x| / eye_dist
+LBP_EYE_Y_ASYM_MAX      = 0.15         # |left_eye.y - right_eye.y| / face_height
+LBP_INFER_CONF_THR      = 0.85         # MTCNN confidence ở inference (siết hơn 0.60 ở train)
+
 
 # ---------------------------------------------------------------------------
 # ★ LBP — Tham số feature extractor (feature_utils.py)
@@ -127,21 +135,28 @@ LBP_T_P_FLOOR        = 0.63    # floor T_p (chặn unknown confident)
 LBP_T_M_PERCENTILE   = 5       # percentile của margin
 LBP_T_M_CAP          = 0.80
 LBP_RULE             = "AND"
-LBP_PER_CLASS_BOOST  = {
-    "Dan":   0.11,
-    "Vi":    0.11,
-    "Triet": 0.012,
-    "Tri":   0.026,
-}
-LBP_PER_CLASS_BOOST_MAX = 0.97   # cap cuối cùng cho T_p_per_class
+# Per-class T_p boost: legacy manual tuning.
+# Sau khi dùng class_weight='balanced' (train_svm) + FAR-driven sweep (calibrate),
+# manual boost không còn cần thiết. Để rỗng = không boost (đồng đều mọi class).
+LBP_PER_CLASS_BOOST  = {}
+LBP_PER_CLASS_BOOST_MAX = 0.97   # cap cuối cùng cho T_p_per_class (vẫn dùng cho safety)
 
 # Split val thành 2 phần: calib (fit Platt) và thresh (pick T_p/T_m/boost).
 # Đặt 0.0 để dùng full val cho Platt và full val cho threshold (legacy, có overfit val).
 LBP_VAL_THRESH_FRAC  = 0.5     # tỉ lệ val đưa sang nhánh "thresh"
 
-# Số ảnh scan từ LBP_UNKNOWN_DIR khi calibrate (chỉ visualize FAR)
+# Số ảnh scan từ LBP_UNKNOWN_DIR khi calibrate (dùng cho FAR sweep + visualize)
 LBP_N_SCAN    = 500
 LBP_N_TARGET  = 300
+
+# FAR-driven threshold sweep (3 tín hiệu open-set: p_max, margin, Mahalanobis)
+# Sweep grid (T_p × T_m × τ_d), pick TAR max với FAR ≤ FAR_BUDGET.
+LBP_FAR_BUDGET            = 0.01    # 1% Unknown được phép lọt
+LBP_FAR_BUDGET_FALLBACK   = 0.05    # nới khi grid không có điểm thỏa
+LBP_SWEEP_TP_RANGE        = (0.50, 0.97, 48)   # (lo, hi, steps)
+LBP_SWEEP_TM_RANGE        = (0.05, 0.80, 30)
+LBP_SWEEP_TAU_PCT_RANGE   = (90.0, 99.9, 20)   # percentile của Mahalanobis trên known
+LBP_USE_FAR_SWEEP         = True    # False = fallback percentile-only (legacy)
 
 
 # ===========================================================================
@@ -233,6 +248,10 @@ class _Config:
     LBP_USE_OVAL_MASK      = LBP_USE_OVAL_MASK
     LBP_SKIP_EXISTING      = LBP_SKIP_EXISTING
     LBP_SAVE_DEBUG_SAMPLES = LBP_SAVE_DEBUG_SAMPLES
+    LBP_POSE_CHECK         = LBP_POSE_CHECK
+    LBP_NOSE_OFFSET_MAX    = LBP_NOSE_OFFSET_MAX
+    LBP_EYE_Y_ASYM_MAX     = LBP_EYE_Y_ASYM_MAX
+    LBP_INFER_CONF_THR     = LBP_INFER_CONF_THR
 
     # Feature
     LBP_IMG_SIZE   = LBP_IMG_SIZE
@@ -268,6 +287,13 @@ class _Config:
     LBP_VAL_THRESH_FRAC     = LBP_VAL_THRESH_FRAC
     LBP_N_SCAN              = LBP_N_SCAN
     LBP_N_TARGET            = LBP_N_TARGET
+
+    LBP_FAR_BUDGET            = LBP_FAR_BUDGET
+    LBP_FAR_BUDGET_FALLBACK   = LBP_FAR_BUDGET_FALLBACK
+    LBP_SWEEP_TP_RANGE        = LBP_SWEEP_TP_RANGE
+    LBP_SWEEP_TM_RANGE        = LBP_SWEEP_TM_RANGE
+    LBP_SWEEP_TAU_PCT_RANGE   = LBP_SWEEP_TAU_PCT_RANGE
+    LBP_USE_FAR_SWEEP         = LBP_USE_FAR_SWEEP
 
     HOG_DIR            = HOG_DIR
     HOG_PKL            = HOG_PKL
