@@ -53,6 +53,15 @@ RETINA_DB_PATH   = RETINA_DIR / "face_database.npy"
 SCRFD_DB_L_PATH  = SCRFD_DIR / "face_db_0.pkl"   # buffalo_l
 SCRFD_DB_S_PATH  = SCRFD_DIR / "face_db_1.pkl"   # buffalo_s
 
+# Sub-label hien thi duoi ten moi pipeline (UI design)
+PIPELINE_SUBS = {
+    "HOG + SVM":                  "Baseline · CPU",
+    "MTCNN + LBP/Sobel-LBP + SVM":    "Hand-crafted features · CPU",
+    "MTCNN + FaceNet":            "Inception-ResNet · embedding",
+    "RetinaFace + ArcFace":       "ResNet50 · 512-d embedding",
+    "SCRFD + ArcFace + FAISS":    "buffalo_s + buffalo_l · FAISS-IVF",
+}
+
 # Cho phep import feature_utils tu LBP_DIR
 if str(LBP_DIR) not in sys.path:
     sys.path.insert(0, str(LBP_DIR))
@@ -282,20 +291,55 @@ class HogSvmPipeline:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline 2: MTCNN + LBP/Sobel-LBP + SVM (calibrated)
+# Pipeline 2: MTCNN + LBP/Sobel-LBP + SVM (calibrated, open-set 3-signal)
 # ---------------------------------------------------------------------------
-EYE_DIST_RATIO = 0.42
-EYE_Y_RATIO    = 0.40
-MIN_VALID      = 0.55
-MIN_FACE_PX    = 30
-LBP_OUT_SIZE   = (128, 128)
+# Đọc params từ config (đồng bộ với mtcnn_finetuned_crop.py + train_svm.py)
+try:
+    from config import cfg as _cfg_lbp
+    EYE_DIST_RATIO     = float(_cfg_lbp.LBP_EYE_DIST_RATIO)
+    EYE_Y_RATIO        = float(_cfg_lbp.LBP_EYE_Y_RATIO)
+    MIN_VALID          = float(_cfg_lbp.LBP_MIN_VALID)
+    MIN_FACE_PX        = int(_cfg_lbp.LBP_MIN_FACE_PX)
+    LBP_OUT_SIZE       = tuple(_cfg_lbp.LBP_OUTPUT_SIZE)
+    LBP_INFER_CONF_THR = float(_cfg_lbp.LBP_INFER_CONF_THR)
+    LBP_POSE_CHECK     = bool(_cfg_lbp.LBP_POSE_CHECK)
+    LBP_NOSE_OFFSET_MAX = float(_cfg_lbp.LBP_NOSE_OFFSET_MAX)
+    LBP_EYE_Y_ASYM_MAX  = float(_cfg_lbp.LBP_EYE_Y_ASYM_MAX)
+except Exception:  # fallback nếu config chưa có key mới
+    EYE_DIST_RATIO = 0.42
+    EYE_Y_RATIO    = 0.40
+    MIN_VALID      = 0.55
+    MIN_FACE_PX    = 30
+    LBP_OUT_SIZE   = (128, 128)
+    LBP_INFER_CONF_THR = 0.85
+    LBP_POSE_CHECK = True
+    LBP_NOSE_OFFSET_MAX = 0.35
+    LBP_EYE_Y_ASYM_MAX  = 0.15
+
+
+def _lbp_pose_ok(landmarks, face_h):
+    """Reject profile / heavily tilted faces — khớp với mtcnn_finetuned_crop._pose_ok."""
+    if not LBP_POSE_CHECK:
+        return True
+    left_eye  = np.float32(landmarks[0])
+    right_eye = np.float32(landmarks[1])
+    nose      = np.float32(landmarks[2])
+    eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0
+    eye_dist  = float(np.linalg.norm(right_eye - left_eye))
+    if eye_dist < 1.0 or face_h < 1.0:
+        return False
+    nose_offset = abs(nose[0] - eye_mid_x) / eye_dist
+    eye_y_asym  = abs(left_eye[1] - right_eye[1]) / face_h
+    return (nose_offset <= LBP_NOSE_OFFSET_MAX) and (eye_y_asym <= LBP_EYE_Y_ASYM_MAX)
 
 
 def lbp_align_and_crop(img_rgb, box, landmarks, out_size=LBP_OUT_SIZE):
-    """Sao y mtcnn_finetuned_crop.align_and_crop, tra ve BGR 128x128."""
+    """Sao y mtcnn_finetuned_crop.align_and_crop + pose sanity check."""
     x1, y1, x2, y2 = box
     w, h = x2 - x1, y2 - y1
     if w < MIN_FACE_PX or h < MIN_FACE_PX:
+        return None
+    if not _lbp_pose_ok(landmarks, h):
         return None
     left_eye  = np.float32(landmarks[0])
     right_eye = np.float32(landmarks[1])
@@ -327,6 +371,7 @@ class LbpSvmPipeline:
         self.pca = None
         self.le = None
         self.thresholds = None
+        self.class_stats = None
         self.extract_features = None
         self.error: str | None = None
         self.ready = False
@@ -347,6 +392,11 @@ class LbpSvmPipeline:
                 self.thresholds = joblib.load(LBP_MODEL_DIR / "thresholds.pkl")
             except Exception:
                 self.thresholds = None
+            try:
+                self.class_stats = joblib.load(LBP_MODEL_DIR / "class_stats.pkl")
+            except Exception:
+                self.class_stats = None
+                print("[LBP] class_stats.pkl không có — Mahalanobis OOD signal tắt")
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.detector = FacenetMTCNN(min_face_size=15,
                                          thresholds=[0.5, 0.6, 0.7],
@@ -361,15 +411,21 @@ class LbpSvmPipeline:
         rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         boxes, probs, lmks = self.detector.detect(rgb, landmarks=True)
         if boxes is None or len(boxes) == 0:
-            return None, None
+            return None, None, "no_face"
         best = int(np.argmax(probs))
-        if probs[best] < 0.6:
-            return None, None
+        if probs[best] < LBP_INFER_CONF_THR:
+            return None, None, "low_conf"
         crop = lbp_align_and_crop(rgb, boxes[best], lmks[best])
         if crop is None:
-            return None, None
-        bbox = boxes[best]
-        return crop, bbox
+            return None, None, "bad_pose_or_crop"
+        return crop, boxes[best], "ok"
+
+    def _mahalanobis(self, feat_p_1d, pred_idx):
+        if self.class_stats is None or int(pred_idx) not in self.class_stats:
+            return None
+        st = self.class_stats[int(pred_idx)]
+        diff = feat_p_1d - st["mu"]
+        return float(np.sqrt(diff @ st["cov_inv"] @ diff))
 
     def _embed(self, crop_bgr):
         feat = self.extract_features(crop_bgr).reshape(1, -1)
@@ -383,10 +439,14 @@ class LbpSvmPipeline:
         t0 = time.time()
         if snap_bgr is None:
             return {"error": "Khong co snapshot"}
-        crop, bbox = self._detect_crop(snap_bgr)
+        crop, bbox, reason = self._detect_crop(snap_bgr)
         if crop is None:
-            return {"error": "MTCNN khong detect duoc",
-                    "annotated": annotate(snap_bgr, None, "No face", (0, 0, 255))}
+            reason_msg = {"no_face":  "No face",
+                          "low_conf": "Low conf",
+                          "bad_pose_or_crop": "Bad pose"}.get(reason, "No face")
+            return {"label": "Unknown",
+                    "error": f"MTCNN reject: {reason}",
+                    "annotated": annotate(snap_bgr, None, reason_msg, (0, 0, 255))}
         feat_p = self._embed(crop)
         probs = self.svm.predict_proba(feat_p)[0]
         pred_idx = int(np.argmax(probs))
@@ -394,27 +454,36 @@ class LbpSvmPipeline:
         sorted_probs = np.sort(probs)
         margin = float(sorted_probs[-1] - sorted_probs[-2]) if len(sorted_probs) >= 2 else 1.0
         cls_name = str(self.le.inverse_transform([pred_idx])[0])
+        d_M = self._mahalanobis(feat_p[0], pred_idx)
 
+        # Triple-threshold AND: p_max ≥ T_p, margin ≥ T_m, Mahalanobis ≤ τ_d
         if self.thresholds is not None:
             T_p = self.thresholds.get("T_p_per_class", {}).get(cls_name,
                   self.thresholds.get("T_p", 0.5))
             T_m = self.thresholds.get("T_m", 0.0)
+            tau_d = self.thresholds.get("tau_d")  # None nếu legacy model
             ok = (p_max >= T_p) and (margin >= T_m)
+            if d_M is not None and tau_d is not None:
+                ok = ok and (d_M <= tau_d)
         else:
             ok = p_max >= 0.5
         final = cls_name if ok else "Unknown"
 
         sim = None
         if ref_bgr is not None:
-            ref_crop, _ = self._detect_crop(ref_bgr)
+            ref_crop, _, _ = self._detect_crop(ref_bgr)
             if ref_crop is not None:
                 sim = cosine(self._embed(ref_crop)[0], feat_p[0])
 
         color = (0, 200, 0) if final != "Unknown" else (0, 0, 255)
-        annotated = annotate(snap_bgr, bbox, f"{final} ({p_max:.2f})", color)
+        d_M_str = f" dM={d_M:.1f}" if d_M is not None else ""
+        annotated = annotate(snap_bgr, bbox,
+                             f"{final} ({p_max:.2f} m={margin:.2f}{d_M_str})", color)
         return {
             "label": final,
             "confidence": p_max,
+            "margin": margin,
+            "mahalanobis": d_M,
             "similarity": sim,
             "annotated": annotated,
             "infer_ms": (time.time() - t0) * 1000,
@@ -790,6 +859,61 @@ class ScrfdFaissPipeline:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline 5 combined: SCRFD chay ca 2 variant buffalo_s + buffalo_l
+# trong 1 logical pipeline, hien thi 1 card voi metrics so sanh 2 variant.
+# ---------------------------------------------------------------------------
+class ScrfdCombinedPipeline:
+    name = "SCRFD + ArcFace + FAISS"
+
+    def __init__(self):
+        self.inner_s = ScrfdFaissPipeline(model_name="buffalo_s")
+        self.inner_l = ScrfdFaissPipeline(model_name="buffalo_l")
+        self.error: str | None = None
+        self.ready = False
+
+    def load(self, force_rebuild: bool = False):
+        try:
+            self.inner_s.load(force_rebuild=force_rebuild)
+        except Exception as e:
+            self.inner_s.error = f"{type(e).__name__}: {e}"
+            self.inner_s.ready = False
+        try:
+            self.inner_l.load(force_rebuild=force_rebuild)
+        except Exception as e:
+            self.inner_l.error = f"{type(e).__name__}: {e}"
+            self.inner_l.ready = False
+        # Ready neu it nhat 1 variant load OK
+        self.ready = self.inner_s.ready or self.inner_l.ready
+        errs = []
+        if not self.inner_s.ready:
+            errs.append(f"S: {self.inner_s.error or 'unknown'}")
+        if not self.inner_l.ready:
+            errs.append(f"L: {self.inner_l.error or 'unknown'}")
+        self.error = " | ".join(errs) if errs else None
+
+    def predict(self, ref_bgr, snap_bgr) -> dict:
+        if not self.ready:
+            return {"error": self.error or "not loaded"}
+        rs = self.inner_s.predict(ref_bgr, snap_bgr) if self.inner_s.ready else {"error": "S not loaded"}
+        rl = self.inner_l.predict(ref_bgr, snap_bgr) if self.inner_l.ready else {"error": "L not loaded"}
+        # Uu tien dung ket qua cua L lam main annotated; fallback ve S.
+        main = rl if rl.get("annotated") is not None else rs
+        if main.get("annotated") is None:
+            return {"error": f"Ca 2 variant deu loi (S: {rs.get('error')}, L: {rl.get('error')})"}
+        total_ms = (rs.get("infer_ms") or 0) + (rl.get("infer_ms") or 0)
+        return {
+            "label": main.get("label", "Unknown"),
+            "confidence": main.get("confidence"),
+            "annotated": main["annotated"],
+            "infer_ms": total_ms,
+            "variants": [
+                {"name": "buffalo_s", **rs},
+                {"name": "buffalo_l", **rl},
+            ],
+        }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 class App:
@@ -798,16 +922,18 @@ class App:
         self.pipes: list[Any] = []
 
     def init_all(self):
+        # 5 logical pipeline. SCRFD chay ca buffalo_s + buffalo_l trong 1 wrapper.
         constructors = [
-            ("HOG + SVM",                 HogSvmPipeline,      {}),
-            ("MTCNN + LBP/Sobel + SVM",   LbpSvmPipeline,      {}),
-            ("MTCNN + FaceNet",           FacenetPipeline,     {"force_rebuild": self.force_rebuild}),
-            ("RetinaFace + ArcFace",      RetinaArcfacePipeline, {"force_rebuild": self.force_rebuild}),
-            ("SCRFD + ArcFace + FAISS",   ScrfdFaissPipeline,  {"force_rebuild": self.force_rebuild}),
+            ("HOG + SVM",                   lambda: HogSvmPipeline(),         {}),
+            ("MTCNN + LBP/Sobel-LBP + SVM",     lambda: LbpSvmPipeline(),         {}),
+            ("MTCNN + FaceNet",             lambda: FacenetPipeline(),        {"force_rebuild": self.force_rebuild}),
+            ("RetinaFace + ArcFace",        lambda: RetinaArcfacePipeline(),  {"force_rebuild": self.force_rebuild}),
+            ("SCRFD + ArcFace + FAISS",     lambda: ScrfdCombinedPipeline(),  {"force_rebuild": self.force_rebuild}),
         ]
-        for label, cls, load_kw in constructors:
+        for label, factory, load_kw in constructors:
             print(f"\n=== Loading: {label} ===")
-            inst = cls()
+            inst = factory()
+            inst.name = label  # override de phan biet 2 variant SCRFD
             try:
                 inst.load(**load_kw) if load_kw else inst.load()
             except Exception as e:
@@ -838,149 +964,1028 @@ class App:
 
 
 # ---------------------------------------------------------------------------
-# Gradio UI
+# Gradio UI — Claude Design (face-demo) styling
 # ---------------------------------------------------------------------------
-def format_caption(name: str, r: dict) -> str:
-    """One-line caption for Gallery item (shown in fullscreen preview)."""
-    if "error" in r and "annotated" not in r:
-        return f"{name} — ERROR: {r['error']}"
-    parts = [name]
-    if "label" in r:
-        parts.append(f"Predict: {r['label']}")
-    if r.get("confidence") is not None:
-        parts.append(f"Conf: {r['confidence']:.3f}")
-    if "infer_ms" in r:
-        parts.append(f"{r['infer_ms']:.0f} ms")
+import html as _html
+
+
+def _esc(s) -> str:
+    """HTML-escape, gracefully xu ly None."""
+    return _html.escape(str(s)) if s is not None else ""
+
+
+def _result_kind(r: dict) -> str:
+    """Map result dict -> kind: success | unknown | error."""
+    if r is None:
+        return "empty"
+    if "annotated" not in r and r.get("error"):
+        return "error"
+    if r.get("label") == "Unknown":
+        return "unknown"
+    return "success"
+
+
+def _status_badge(kind: str, text: str) -> str:
+    """Render <span class='badge ...'>...</span>."""
+    return f'<span class="badge {kind}"><span class="b-dot"></span>{_esc(text)}</span>'
+
+
+def _status_table_html(pipes) -> str:
+    """Render status card hien thi tinh trang load 6 pipeline."""
+    ok = sum(1 for p in pipes if p.ready)
+    err = len(pipes) - ok
+    err_pill = f' <span class="badge err"><span class="b-dot"></span>{err} lỗi</span>' if err else ""
+    rows = []
+    for i, p in enumerate(pipes, 1):
+        sub = PIPELINE_SUBS.get(p.name, "")
+        if p.ready:
+            badge = _status_badge("ok", "OK")
+            err_small = ""
+            row_cls = ""
+        else:
+            badge = _status_badge("err", "ERROR")
+            err_small = (f'<small style="color:var(--red-700);font-family:var(--mono);">'
+                         f'{_esc(p.error or "unknown")}</small>')
+            row_cls = " err-row"
+        rows.append(
+            f'<div class="status-row{row_cls}">'
+            f'  <span class="num">P{i}</span>'
+            f'  <div class="name">{_esc(p.name)}'
+            f'    <small>{_esc(sub)}</small>'
+            f'    {err_small}'
+            f'  </div>'
+            f'  {badge}'
+            f'</div>'
+        )
+    return (
+        '<div class="card status-card" id="status_card">'
+        '  <div class="card-head">'
+        '    <div class="card-title">'
+        '      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">'
+        '        <rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/>'
+        '        <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"/>'
+        '      </svg>'
+        f'      Trạng thái khởi tạo pipeline <span class="sub">· {ok}/{len(pipes)} sẵn sàng</span>'
+        '    </div>'
+        f'    <div style="display:flex;gap:8px;align-items:center;">{err_pill}'
+        '      <button type="button" class="btn btn-ghost" id="status_toggle"'
+        '        style="height:30px;padding:0 12px;font-size:12px;">Thu gọn</button>'
+        '    </div>'
+        '  </div>'
+        f'  <div class="status-list" id="status_list">{"".join(rows)}</div>'
+        '</div>'
+    )
+
+
+def _result_header_html(idx: int, pipe_name: str, kind: str) -> str:
+    """Header card kem badge trang thai. idx tu 0."""
+    sub = PIPELINE_SUBS.get(pipe_name, "")
+    if kind == "empty":
+        badge = _status_badge("ok", "Sẵn sàng")
+    elif kind == "loading":
+        badge = _status_badge("info", "Đang xử lý…")
+    elif kind == "success":
+        badge = (
+            '<span class="badge ok"><span class="b-dot"></span>'
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">'
+            '<path d="M20 6L9 17l-5-5"/></svg>Nhận diện</span>'
+        )
+    elif kind == "unknown":
+        badge = _status_badge("warn", "Unknown")
+    else:  # error
+        badge = (
+            '<span class="badge err"><span class="b-dot"></span>'
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">'
+            '<path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'
+            '<path d="M12 9v4"/><path d="M12 17h.01"/></svg>Lỗi</span>'
+        )
+    return (
+        '<div class="result-head">'
+        '  <div class="result-title">'
+        f'    <div class="pipe-num">P{idx + 1}</div>'
+        f'    <div><div class="pipe-name">{_esc(pipe_name)}<small>{_esc(sub)}</small></div></div>'
+        '  </div>'
+        f'  {badge}'
+        '</div>'
+    )
+
+
+def _result_metrics_html(r: dict | None, kind: str) -> str:
+    """Render metrics row duoi anh: Predict / Confidence / Time / Note."""
+    if kind == "empty":
+        return (
+            '<div class="result-metrics">'
+            '  <div class="metric"><span class="k">Predict</span><span class="v muted">—</span></div>'
+            '  <div class="metric"><span class="k">Confidence</span><span class="v muted">—</span></div>'
+            '  <div class="metric" style="grid-column:1/-1;"><span class="k">Time</span><span class="v muted">—</span></div>'
+            '</div>'
+        )
+    if kind == "loading":
+        return (
+            '<div class="result-metrics">'
+            '  <div class="metric"><span class="k">Predict</span><span class="skel" style="width:64px;height:14px;"></span></div>'
+            '  <div class="metric"><span class="k">Confidence</span><span class="skel" style="width:48px;height:14px;"></span></div>'
+            '  <div class="metric" style="grid-column:1/-1;"><span class="k">Time</span><span class="skel" style="width:48px;height:14px;"></span></div>'
+            '</div>'
+        )
+    if kind == "error":
+        msg = r.get("error", "Pipeline loi") if r else "Pipeline loi"
+        return (
+            '<div class="result-metrics">'
+            '  <div class="metric"><span class="k">Predict</span><span class="v muted">—</span></div>'
+            '  <div class="metric"><span class="k">Confidence</span><span class="v muted">—</span></div>'
+            '  <div class="metric" style="grid-column:1/-1;"><span class="k">Time</span><span class="v muted">—</span></div>'
+            f'  <div class="note-row"><span>⚠</span><span>{_esc(msg)}</span></div>'
+            '</div>'
+        )
+    # success / unknown
+    label = r.get("label", "?")
+    conf = r.get("confidence")
+    conf_s = f"{conf:.3f}" if conf is not None else "—"
+    t = r.get("infer_ms")
+    t_s = f"{t:.0f} ms" if t is not None else "—"
+    tag_cls = "tag-unknown" if kind == "unknown" else "tag-name"
+    note_html = ""
     if r.get("error"):
-        parts.append(f"warn: {r['error']}")
-    return " | ".join(parts)
+        note_html = (
+            f'<div class="note-row warn"><span>ⓘ</span><span>{_esc(r["error"])}</span></div>'
+        )
+
+    # Neu pipeline co "variants" (vd: SCRFD S+L) -> render block so sanh variant
+    variants_html = ""
+    if r.get("variants"):
+        rows = []
+        for v in r["variants"]:
+            v_name = v.get("name", "?")
+            if v.get("error") and v.get("annotated") is None:
+                rows.append(
+                    f'<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:11px;border-top:1px dashed var(--neutral-3);">'
+                    f'  <span style="font-family:var(--mono);color:var(--base-text-second);font-weight:700;">{_esc(v_name)}</span>'
+                    f'  <span style="color:var(--red-700);">— {_esc(v.get("error", "loi"))}</span>'
+                    f'</div>'
+                )
+            else:
+                v_label = v.get("label", "?")
+                v_conf = v.get("confidence")
+                v_conf_s = f"{v_conf:.3f}" if v_conf is not None else "—"
+                v_t = v.get("infer_ms")
+                v_t_s = f"{v_t:.0f} ms" if v_t is not None else "—"
+                v_unk = v_label == "Unknown"
+                v_tag_cls = "tag-unknown" if v_unk else "tag-name"
+                rows.append(
+                    f'<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center;padding:6px 0;font-size:11px;border-top:1px dashed var(--neutral-3);">'
+                    f'  <span style="font-family:var(--mono);color:var(--base-text-second);font-weight:700;">{_esc(v_name)}</span>'
+                    f'  <span class="v {v_tag_cls}" style="font-family:var(--mono);font-size:10px;justify-self:start;">{_esc(v_label)}</span>'
+                    f'  <span style="font-family:var(--mono);font-weight:700;">{v_conf_s}</span>'
+                    f'  <span style="font-family:var(--mono);color:var(--base-text-second);">{v_t_s}</span>'
+                    f'</div>'
+                )
+        variants_html = (
+            '<div style="grid-column:1/-1;margin-top:6px;">'
+            '  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--base-text-second);font-weight:700;margin-bottom:2px;">So sánh 2 variant</div>'
+            + "".join(rows) +
+            '</div>'
+        )
+
+    return (
+        '<div class="result-metrics">'
+        f'  <div class="metric"><span class="k">Predict</span>'
+        f'    <span class="v {tag_cls}">{_esc(label)}</span></div>'
+        f'  <div class="metric"><span class="k">Confidence</span><span class="v">{conf_s}</span></div>'
+        f'  <div class="metric" style="grid-column:1/-1;"><span class="k">Time</span><span class="v">{t_s}</span></div>'
+        f'  {variants_html}'
+        f'  {note_html}'
+        '</div>'
+    )
 
 
-def format_row(name: str, r: dict) -> str:
-    """Markdown table row summarizing one pipeline result."""
-    if "error" in r and "annotated" not in r:
-        return f"| {name} | — | — | — | ERROR: {r['error']} |"
-    label = f"`{r['label']}`" if "label" in r else "—"
-    conf = f"{r['confidence']:.3f}" if r.get("confidence") is not None else "—"
-    t = f"{r['infer_ms']:.0f} ms" if "infer_ms" in r else "—"
-    note = r.get("error") or ""
-    return f"| {name} | {label} | {conf} | {t} | {note} |"
+def _result_card_class(kind: str) -> str:
+    """Map kind -> class boi them cho .result-card (de mau border-top)."""
+    if kind in ("success", "unknown", "error"):
+        return kind
+    return ""
+
+
+def _summary_table_html(results: list | None, view_state: str) -> str:
+    """Render bang tong ket so sanh pipeline (plain table, khong highlight)."""
+    head = (
+        '<div class="card summary-card">'
+        '  <div class="card-head">'
+        '    <div class="card-title">'
+        '      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">'
+        '        <path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>'
+        '      </svg>'
+        '      Bảng tổng kết <span class="sub">· so sánh các pipeline trên cùng ảnh</span>'
+        '    </div>'
+        '  </div>'
+        '  <div style="overflow-x:auto;">'
+        '    <table class="summary"><thead><tr>'
+        '      <th style="width:50px;">#</th>'
+        '      <th>Pipeline</th>'
+        '      <th>Predict</th>'
+        '      <th class="num">Confidence</th>'
+        '      <th class="num">Time</th>'
+        '    </tr></thead><tbody>'
+    )
+    if not results or view_state != "results":
+        body_rows = []
+        for i, name in enumerate(PIPELINE_SUBS.keys(), 1):
+            sub = PIPELINE_SUBS[name]
+            body_rows.append(
+                f'<tr><td class="num" style="color:var(--base-text-second);">P{i}</td>'
+                f'<td><div style="font-weight:700;color:var(--neutral-9);">{_esc(name)}</div>'
+                f'<div style="font-size:11px;color:var(--base-text-second);">{_esc(sub)}</div></td>'
+                '<td><span style="color:var(--base-text-second);">—</span></td>'
+                '<td class="num">—</td><td class="num">—</td></tr>'
+            )
+        return head + "".join(body_rows) + '</tbody></table></div></div>'
+
+    body_rows = []
+    for i, (name, r) in enumerate(results):
+        kind = _result_kind(r)
+        sub = PIPELINE_SUBS.get(name, "")
+        row_cls = "err-row" if kind == "error" else ""
+        # Predict cell
+        if kind == "error":
+            predict_cell = '<span style="color:var(--base-text-second);">—</span>'
+        elif kind == "unknown":
+            predict_cell = '<span class="v tag-unknown" style="font-family:var(--mono);">Unknown</span>'
+        else:
+            predict_cell = f'<span class="v tag-name" style="font-family:var(--mono);">{_esc(r.get("label", "?"))}</span>'
+        conf = r.get("confidence")
+        conf_cell = f'{conf:.3f}' if conf is not None else "—"
+        t = r.get("infer_ms")
+        time_cell = f'{t:.0f} ms' if t is not None else "—"
+        body_rows.append(
+            f'<tr class="{row_cls}">'
+            f'  <td class="num" style="color:var(--base-text-second);">P{i + 1}</td>'
+            f'  <td><div style="font-weight:700;color:var(--neutral-9);">{_esc(name)}</div>'
+            f'    <div style="font-size:11px;color:var(--base-text-second);">{_esc(sub)}</div></td>'
+            f'  <td>{predict_cell}</td>'
+            f'  <td class="num">{conf_cell}</td>'
+            f'  <td class="num">{time_cell}</td>'
+            f'</tr>'
+        )
+    return head + "".join(body_rows) + '</tbody></table></div></div>'
+
+
+# ---------------------------------------------------------------------------
+# CSS tu Claude Design (tokens.css + face-demo.html). Embed nguyen ban de
+# Gradio render. Mot vai overrides cuoi cung dieu chinh layout container.
+# ---------------------------------------------------------------------------
+_FACE_DEMO_CSS = r"""
+/* ============ tokens.css ============ */
+:root {
+  --primary: #418dff;
+  --primary-hover: #1b63f5;
+  --primary-active: #144ee1;
+  --primary-active-hover: #173fb6;
+  --primary-bg: #d9ebff;
+  --primary-foreground: #ffffff;
+  --secondary: #ffa921;
+  --secondary-hover: #ea9f25;
+  --secondary-bg: #ffefc6;
+  --secondary-foreground: #ffffff;
+  --success: #4caf50;
+  --success-hover: #45a049;
+  --warning: #ff9800;
+  --warning-hover: #e68a00;
+  --danger: #f44336;
+  --danger-hover: #e53935;
+  --info: #2196f3;
+  --info-hover: #1976d2;
+  --base-text: #212529;
+  --base-text-second: #6c757d;
+  --base-text-disabled: #adb5bd;
+  --base-text-link: #418dff;
+  --base-text-link-hover: #1b63f5;
+  --background: #ffffff;
+  --foreground: #333333;
+  --card: #ffffff;
+  --muted: #f9fafb;
+  --muted-foreground: #6b7280;
+  --accent: #e0f2fe;
+  --accent-foreground: #418dff;
+  --border: #e5e7eb;
+  --input: #e5e7eb;
+  --ring: var(--primary);
+  --blue-50:#e6f4ff; --blue-100:#bae0ff; --blue-200:#91caff; --blue-700:#003eb3;
+  --geekblue-500:#2f54eb;
+  --green-50:#f6ffed; --green-200:#b7eb8f; --green-400:#73d13d; --green-500:#52c41a; --green-700:#237804;
+  --gold-50:#fffbe6; --gold-200:#ffe58f; --gold-400:#ffc53d; --gold-500:#faad14; --gold-700:#ad6800; --gold-800:#874d00;
+  --red-50:#fff1f0; --red-200:#ffa39e; --red-700:#a8071a;
+  --neutral-2:#fafafa; --neutral-3:#f5f5f5; --neutral-4:#f0f0f0; --neutral-5:#d9d9d9; --neutral-8:#595959; --neutral-9:#262626;
+  --radius: 0.5rem;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  --font-sans: "Nunito", "Roboto", Inter, Avenir, Helvetica, Arial, sans-serif;
+  --font-body: "Roboto", "Nunito", Inter, Helvetica, Arial, sans-serif;
+  --page-bg: #f4f6fa;
+  --shell-bg: #ffffff;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ============ Gradio container overrides ============ */
+html, body {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(65,141,255,0.06) 0%, transparent 60%),
+    var(--page-bg) !important;
+  color: var(--base-text) !important;
+  margin: 0; padding: 0;
+}
+gradio-app {
+  background: transparent !important;
+  display: block;
+  width: 100%;
+}
+.gradio-container {
+  max-width: 1600px !important;
+  margin: 0 auto !important;
+  background: transparent !important;
+  font-family: var(--font-body) !important;
+  color: var(--base-text) !important;
+  padding: 28px 32px 60px !important;
+}
+.gradio-container .main, .gradio-container > .main > .wrap { background: transparent !important; }
+.gradio-container .prose h1, .gradio-container .prose h2,
+.gradio-container .prose h3, .gradio-container .prose p { margin: 0 !important; }
+footer { display: none !important; }  /* hide gradio footer */
+
+/* ============ Base typography ============ */
+h1,h2,h3,h4,h5,h6 { font-family: var(--font-sans); margin: 0; color: var(--base-text); }
+.h-display { font-family: var(--font-sans); font-weight: 800; letter-spacing: -0.01em; }
+.mono { font-family: var(--mono); }
+
+/* ============ Hero ============ */
+.hero { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; }
+.hero h1 { font-size: 52px; line-height: 1.12; font-weight: 800; color: var(--neutral-9) !important; }
+.hero p.lede {
+  margin-top: 14px !important;
+  color: var(--base-text-second) !important;
+  font-size: 20px;
+  max-width: 920px;
+  line-height: 1.6;
+  background: transparent !important;
+}
+.hero p.lede b, .hero p.lede strong {
+  color: var(--primary) !important;
+  background: transparent !important;
+  font-weight: 700;
+}
+
+/* ============ Card / workbench ============ */
+.card {
+  background: var(--shell-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.card-head {
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+}
+.card-title {
+  font-family: var(--font-sans); font-weight: 700; font-size: 18px; color: var(--neutral-9);
+  display:flex; align-items:center; gap: 10px;
+}
+.card-title .sub { font-weight: 500; color: var(--base-text-second); font-size: 14px; }
+.card-title svg { width: 20px !important; height: 20px !important; }
+
+.pill {
+  display:inline-flex; align-items:center; gap:6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--muted); border:1px solid var(--border);
+  font-size: 12px; color: var(--neutral-8); font-weight: 600;
+}
+.pill .dot { width:6px; height:6px; border-radius:999px; background: var(--success);
+             box-shadow: 0 0 0 3px rgba(76,175,80,0.18); }
+
+/* ============ Input card / dark stage ============ */
+#input_card_wrap { display: flex; flex-direction: column; gap: 0; }
+#input_card_wrap > .card { padding: 0 !important; }
+#snap_in_component {
+  border-radius: 0 !important;
+  background: linear-gradient(135deg, #11192a 0%, #1d2a47 100%) !important;
+  border: 0 !important;
+  min-height: 680px;
+}
+#snap_in_component .upload-container, #snap_in_component .image-container {
+  background: transparent !important;
+  border: 0 !important;
+}
+#snap_in_component label { color: #cdd6e6 !important; }
+
+/* ============ Action bar — 3 nut chia deu 1 hang ============ */
+.actionbar-wrap {
+  padding: 16px 20px !important;
+  background: var(--muted) !important;
+  border-top: 1px solid var(--border);
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  flex-wrap: nowrap !important;
+}
+.actionbar-wrap > * {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+}
+.actionbar-wrap button {
+  width: 100% !important;
+  white-space: nowrap !important;
+}
+
+/* Override Gradio default button styles. Tang specificity bang nested selectors. */
+.gradio-container .btn-capture button,
+.gradio-container .btn-analyze button,
+.gradio-container .btn-clear button,
+.gradio-container .btn-capture > button,
+.gradio-container .btn-analyze > button,
+.gradio-container .btn-clear > button {
+  border-radius: var(--radius-md) !important;
+  font-family: var(--font-body) !important;
+  font-weight: 700 !important;
+  border: 1px solid transparent !important;
+  transition: filter 0.12s ease, transform 0.06s ease, background 0.12s ease !important;
+  text-shadow: none !important;
+}
+
+/* CHUP — orange */
+.gradio-container .btn-capture button,
+.gradio-container .btn-capture > button {
+  background: #ffa921 !important;
+  background-color: #ffa921 !important;
+  background-image: linear-gradient(135deg, #ffb851 0%, #ffa921 100%) !important;
+  color: #fff !important;
+  height: 52px !important; min-height: 52px !important;
+  padding: 0 22px !important; font-size: 16px !important;
+  box-shadow: 0 6px 14px -3px rgba(255,169,33,0.55) !important;
+  border-color: transparent !important;
+}
+.gradio-container .btn-capture button:hover,
+.gradio-container .btn-capture > button:hover {
+  background: #ea9f25 !important;
+  background-image: linear-gradient(135deg, #ffb851 0%, #ea9f25 100%) !important;
+  filter: brightness(1.05);
+}
+
+/* PHAN TICH — blue hero */
+.gradio-container .btn-analyze button,
+.gradio-container .btn-analyze > button {
+  height: 58px !important; min-height: 58px !important;
+  padding: 0 28px !important; font-size: 17px !important;
+  background: #418dff !important;
+  background-image: linear-gradient(135deg, #418dff 0%, #144ee1 100%) !important;
+  color: #fff !important;
+  box-shadow: 0 10px 20px -4px rgba(65,141,255,0.55) !important;
+  border-color: transparent !important;
+}
+.gradio-container .btn-analyze button:hover,
+.gradio-container .btn-analyze > button:hover {
+  filter: brightness(1.08) !important;
+  background-image: linear-gradient(135deg, #1b63f5 0%, #144ee1 100%) !important;
+}
+
+/* CLEAR — ghost / outline grey */
+.gradio-container .btn-clear button,
+.gradio-container .btn-clear > button {
+  height: 52px !important; min-height: 52px !important;
+  padding: 0 22px !important; font-size: 16px !important;
+  background: #ffffff !important;
+  background-image: none !important;
+  color: #595959 !important;
+  border: 1px solid #d9d9d9 !important;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04) !important;
+}
+.gradio-container .btn-clear button:hover,
+.gradio-container .btn-clear > button:hover {
+  background: #f5f5f5 !important;
+  border-color: #bfbfbf !important;
+  color: #262626 !important;
+}
+
+/* ============ Status table ============ */
+.status-card .card-head { background: linear-gradient(180deg, #fafbfd, #ffffff); }
+.status-list { padding: 6px 0; }
+.status-row {
+  display:grid; grid-template-columns: 34px 1fr auto; gap: 14px; align-items:center;
+  padding: 14px 22px; border-bottom: 1px solid var(--neutral-3); font-size: 15px;
+}
+.status-row:last-child { border-bottom: 0; }
+.status-row .num {
+  font-size: 13px; color: var(--base-text-second); font-weight: 700;
+  font-family: var(--mono); text-align: right;
+}
+.status-row .name { color: var(--neutral-9); font-weight: 600; }
+.status-row .name small { display:block; color: var(--base-text-second); font-weight: 500; font-size: 13px; margin-top: 3px; }
+.status-row.err-row { background: var(--red-50); }
+.status-list.collapsed { display: none; }
+
+#status_toggle {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--neutral-8);
+  cursor: pointer;
+  font-weight: 700;
+  height: 30px; padding: 0 12px; font-size: 12px;
+  font-family: var(--font-body);
+}
+#status_toggle:hover { background: var(--neutral-3); }
+
+/* ============ Badge ============ */
+.badge {
+  display:inline-flex; align-items:center; gap:7px;
+  padding: 5px 12px; border-radius: 999px;
+  font-size: 13px; font-weight: 700; border:1px solid transparent;
+}
+.badge .b-dot { width:8px; height:8px; border-radius: 999px; }
+.badge.ok   { background: var(--green-50); color: var(--green-700); border-color: var(--green-200); }
+.badge.ok   .b-dot { background: var(--success); }
+.badge.err  { background: var(--red-50); color: var(--red-700); border-color: var(--red-200); }
+.badge.err  .b-dot { background: var(--danger); }
+.badge.warn { background: var(--gold-50); color: var(--gold-700); border-color: var(--gold-200); }
+.badge.warn .b-dot { background: var(--warning); }
+.badge.info { background: var(--blue-50); color: var(--blue-700); border-color: var(--blue-200); }
+.badge.info .b-dot { background: var(--info); }
+
+/* ============ Section head + legend ============ */
+.section-head {
+  margin-top: 28px;
+  display:flex; align-items: baseline; justify-content: space-between; gap: 16px;
+}
+.section-head h2 { font-size: 32px; font-family: var(--font-sans); font-weight: 800; color: var(--neutral-9) !important; }
+.section-head .meta { font-size: 15px; color: var(--base-text-second); margin-top: 8px; }
+.section-head .meta b, .section-head .meta strong {
+  color: var(--primary) !important;
+  background: transparent !important;
+  font-weight: 700;
+}
+.legend { display:inline-flex; gap: 18px; align-items:center; }
+.legend-item {
+  display:inline-flex; gap: 6px; align-items:center;
+  font-size: 14px; color: var(--base-text-second); font-weight: 600;
+}
+.legend-swatch { width: 10px; height: 10px; border-radius: 2px; display:inline-block; }
+
+/* ============ Result cards ============ */
+.result-card-wrap {
+  background: var(--shell-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.result-card-wrap:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.empty-spacer { visibility: hidden !important; }
+.result-card-wrap.success { border-top: 3px solid var(--success); }
+.result-card-wrap.unknown { border-top: 3px solid var(--gold-500); }
+.result-card-wrap.error   { border-top: 3px solid var(--danger);
+                            background: linear-gradient(180deg, #fff5f5 0%, #ffffff 70%); }
+
+.result-head {
+  display:flex; align-items:center; justify-content: space-between;
+  padding: 16px 18px 14px;
+}
+.result-title { display:flex; align-items:center; gap: 14px; }
+.pipe-num {
+  width: 38px; height: 38px; border-radius: 8px;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-family: var(--mono); font-weight: 700; font-size: 13px;
+  background: var(--muted); color: var(--base-text-second);
+  border: 1px solid var(--border);
+}
+.pipe-name { font-family: var(--font-sans); font-weight: 800; font-size: 18px; color: var(--neutral-9); line-height: 1.25; }
+.pipe-name small { display:block; font-family: var(--font-body); font-weight: 500; color: var(--base-text-second); font-size: 13px; margin-top: 4px; }
+
+/* Anh ket qua trong card — gioi han trong card */
+/* Card styling — KHONG ap dung khi fullscreen (de Gradio's native CSS handle). */
+.result-card-wrap .image-container:not(:fullscreen),
+.result-card-wrap .image-frame:not(:fullscreen) {
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 0 14px;
+  background: #11192a;
+}
+.result-card-wrap img { object-fit: contain; }
+
+/* Fullscreen — Gradio 6 da co san CSS chuan cho .image-container:fullscreen
+   (black bg, flex-center, img max-width:90vw max-height:90vh object-fit:scale-down).
+   Minh chi can override 4 properties cua card-custom styling cu de no khong
+   chen vao khi fullscreen. KHONG dung den width/height/display/img sizing. */
+.image-container:fullscreen {
+  background: #000 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+
+/* AN nut download / share / clear / FULLSCREEN cua gr.Image trong result cards.
+   An nut fullscreen cua Gradio vi minh dung custom lightbox JS thay the. */
+.result-card-wrap button[aria-label*="ownload" i],
+.result-card-wrap button[aria-label*="hare" i],
+.result-card-wrap button[aria-label*="lear" i],
+.result-card-wrap button[aria-label*="emove" i],
+.result-card-wrap button[aria-label*="ullscreen" i],
+.result-card-wrap a[download],
+.result-card-wrap .icon-button-wrapper button[title*="ownload" i],
+.result-card-wrap .icon-button-wrapper button[title*="hare" i],
+.result-card-wrap .icon-button-wrapper button[title*="ullscreen" i] {
+  display: none !important;
+}
+/* Cung an nut download/share trong snapshot input */
+#snap_in_component button[aria-label*="ownload" i],
+#snap_in_component button[aria-label*="hare" i] { display: none !important; }
+
+/* Custom lightbox — bypass Gradio's native fullscreen vi no conflict CSS gay flicker */
+.result-card-wrap img { cursor: zoom-in; }
+.fr-lightbox {
+  position: fixed; inset: 0;
+  z-index: 9999;
+  background: rgba(8, 12, 22, 0.95);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 40px;
+  cursor: zoom-out;
+  animation: fr-fade-in 0.18s ease;
+}
+@keyframes fr-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.fr-lightbox img {
+  max-width: calc(100vw - 80px);
+  max-height: calc(100vh - 80px);
+  width: auto; height: auto;
+  object-fit: contain;
+  display: block;
+  border-radius: 8px;
+  box-shadow: 0 30px 80px -10px rgba(0,0,0,0.6);
+}
+.fr-lightbox .fr-close {
+  position: absolute; top: 24px; right: 24px;
+  width: 44px; height: 44px; border-radius: 10px;
+  background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+  color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 700;
+  transition: background 0.12s ease;
+}
+.fr-lightbox .fr-close:hover { background: rgba(255,255,255,0.2); }
+.fr-lightbox .fr-title {
+  position: absolute; top: 28px; left: 28px;
+  color: #fff; font-family: var(--font-sans); font-weight: 700; font-size: 16px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.16);
+  padding: 8px 14px; border-radius: 10px;
+}
+
+.result-metrics {
+  padding: 16px 18px 18px;
+  display:grid; grid-template-columns: 1fr 1fr;
+  gap: 4px 20px;
+  font-size: 15px;
+}
+.metric {
+  display:flex; align-items:center; justify-content: space-between;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--neutral-3);
+}
+.metric:nth-last-child(-n+2):not(.note-row) { border-bottom: 0; }
+.metric .k { color: var(--base-text-second); font-weight: 600; font-size: 14px; }
+.metric .v { font-family: var(--mono); font-weight: 700; color: var(--neutral-9); font-size: 14px; }
+.metric .v.tag-name {
+  padding: 4px 12px; border-radius: 4px;
+  background: var(--green-50); color: var(--green-700); border: 1px solid var(--green-200);
+  font-family: var(--mono); font-size: 13px;
+}
+.metric .v.tag-unknown {
+  background: var(--gold-50); color: var(--gold-700); border:1px solid var(--gold-200);
+  padding: 4px 12px; border-radius: 4px; font-size: 13px;
+}
+.metric .v.muted { color: var(--base-text-second); font-weight: 500; }
+.note-row {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--red-50);
+  border: 1px solid var(--red-200);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--red-700);
+  display:flex; gap: 8px; align-items:flex-start;
+}
+.note-row.warn { background: var(--gold-50); border-color: var(--gold-200); color: var(--gold-800); }
+
+.skel {
+  background: linear-gradient(90deg, var(--neutral-3) 0%, var(--neutral-4) 50%, var(--neutral-3) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  display:inline-block;
+}
+@keyframes shimmer { 0%{background-position: 200% 0;} 100%{background-position: -200% 0;} }
+
+/* ============ Summary table ============ */
+.summary-card { margin-top: 32px; }
+table.summary { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 15px; }
+table.summary thead th {
+  text-align: left; background: #fafbfd;
+  color: var(--base-text-second); font-weight: 700; font-size: 13px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+}
+table.summary thead th.num, table.summary tbody td.num {
+  text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono);
+}
+table.summary tbody td {
+  padding: 16px 20px; border-bottom: 1px solid var(--neutral-3);
+  color: var(--neutral-9); vertical-align: middle;
+  font-size: 15px;
+}
+table.summary tbody tr:last-child td { border-bottom: 0; }
+table.summary tbody tr.err-row { background: linear-gradient(90deg, var(--red-50) 0%, transparent 30%); }
+table.summary tbody tr:hover { background: var(--muted); }
+.rank-trophy {
+  display:inline-flex; align-items:center; gap:4px;
+  padding: 2px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; margin-left: 6px;
+}
+.rank-trophy.fastest   { background: var(--green-50); color: var(--green-700); border:1px solid var(--green-200); }
+.rank-trophy.slowest   { background: var(--gold-50);  color: var(--gold-700);  border:1px solid var(--gold-200); }
+.rank-trophy.best-conf { background: var(--blue-50);  color: var(--blue-700);  border:1px solid var(--blue-200); }
+
+/* ============ Footer ============ */
+.foot {
+  margin-top: 44px; padding: 20px 0;
+  border-top: 1px solid var(--border);
+  color: var(--base-text-second); font-size: 13px;
+  display:flex; justify-content: space-between; align-items: center;
+}
+.kbd {
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 4px; background: var(--neutral-3);
+  font-family: var(--font-body); font-size: 11px; font-weight: 700; color: var(--neutral-8);
+  margin: 0 2px;
+}
+"""
+
+_HEAD = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&family=Roboto:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+"""
+
+_HERO_HTML = """
+<div class="hero">
+  <div>
+    <h1 class="h-display">Face Recognition — Demo 5 Pipeline</h1>
+    <p class="lede">
+      Chụp ảnh từ webcam hoặc tải ảnh lên, sau đó bấm <b>Phân tích</b> để chạy song song 5 pipeline nhận diện khuôn mặt
+      trên cùng một ảnh. So sánh kết quả predict, confidence và thời gian inference trực tiếp ở phần dưới.
+    </p>
+  </div>
+</div>
+"""
+
+_INPUT_CARD_HEAD = """
+<div class="card-head">
+  <div class="card-title">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+      <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/>
+      <circle cx="12" cy="13" r="3.5"/>
+    </svg>
+    Snapshot đầu vào <span class="sub">· chụp hoặc tải ảnh</span>
+  </div>
+  <span class="pill"><span class="dot"></span>Webcam OK</span>
+</div>
+"""
+
+_SECTION_HEAD_HTML = """
+<div class="section-head">
+  <div>
+    <h2>Kết quả</h2>
+    <div class="meta">5 pipeline · bấm <b>Phân tích</b> để bắt đầu, click icon fullscreen để xem ảnh to.</div>
+  </div>
+  <div class="legend">
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--success);"></span>Match</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--gold-500);"></span>Unknown</span>
+    <span class="legend-item"><span class="legend-swatch" style="background:var(--danger);"></span>Error</span>
+  </div>
+</div>
+"""
+
+_FOOTER_HTML = """
+<div class="foot">
+  <div>FaceLab · CS231 — Đồ án nhận diện khuôn mặt</div>
+  <div>Phím tắt: <span class="kbd">Esc</span> thoát fullscreen</div>
+</div>
+"""
 
 
 def build_ui(app: App):
     import gradio as gr
 
-    with gr.Blocks(title="Face Recognition - 5 Pipeline Demo") as demo:
-        gr.Markdown("# Face Recognition - 5 Pipeline Demo\n"
-                    "Chup **snapshot tu webcam/OBS** (hoac upload anh) roi nhan "
-                    "**Chup & Phan tich** de chay 5 pipeline song song.")
+    N_PIPES = len(app.pipes)
 
-        snap_in = gr.Image(
-            label="Snapshot (Webcam / OBS)",
-            sources=["webcam", "upload"],
-            type="numpy",
-            height=480,
-        )
+    # CSS + head duoc truyen vao launch() o Gradio 6 (khong con o Blocks init).
+    # Luu them vao demo attribute de main() lay ra.
+    with gr.Blocks(title="Face Recognition — Demo 6 Pipeline") as demo:
+        demo._face_demo_css = _FACE_DEMO_CSS
+        demo._face_demo_head = _HEAD
+        gr.HTML(_HERO_HTML)
 
-        with gr.Row():
-            capture_btn = gr.Button("Chup & Phan tich", variant="primary", scale=3)
-            clear_btn = gr.Button("Chup lai / Clear", variant="secondary", scale=1)
+        # ===== Workbench: input card (left) + status card (right) =====
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=145, min_width=560, elem_id="input_card_wrap"):
+                with gr.Column(elem_classes="card"):
+                    gr.HTML(_INPUT_CARD_HEAD)
+                    snap_in = gr.Image(
+                        label="",
+                        sources=["webcam", "upload"],
+                        type="numpy",
+                        height=680,
+                        show_label=False,
+                        elem_id="snap_in_component",
+                    )
+                    with gr.Row(elem_classes="actionbar-wrap"):
+                        capture_btn = gr.Button("📷  Chụp", elem_classes="btn-capture")
+                        analyze_btn = gr.Button("▶  Phân tích 5 pipeline", elem_classes="btn-analyze")
+                        clear_btn = gr.Button("🗑  Chụp lại / Clear", elem_classes="btn-clear")
 
-        status_md = gr.Markdown(app.status_table())
+            with gr.Column(scale=100, min_width=380):
+                status_html = gr.HTML(_status_table_html(app.pipes))
 
-        gr.Markdown("## Ket qua")
-        result_gallery = gr.Gallery(
-            label="Ket qua 5 pipeline (click de fullscreen, dung mui ten de chuyen)",
-            columns=5,
-            rows=1,
-            height=320,
-            object_fit="contain",
-            show_label=True,
-            preview=False,
-            allow_preview=True,
-            buttons=["download", "fullscreen"],
-        )
-        summary_md = gr.Markdown()
+        # ===== Section head + result grid =====
+        gr.HTML(_SECTION_HEAD_HTML)
 
-        _SUMMARY_HEADER = (
-            "| Pipeline | Predict | Confidence | Time | Note |\n"
-            "|---|---|---|---|---|"
-        )
+        result_headers: list = []
+        result_imgs: list = []
+        result_metrics: list = []
+        # Row 1: 3 card. Row 2: 2 card + 1 spacer (de chieu rong card dong nhat).
+        layout = [
+            [0, 1, 2],
+            [3, 4, None],   # None = spacer empty column
+        ]
+        for row in layout:
+            with gr.Row(equal_height=True):
+                for slot in row:
+                    if slot is None or slot >= N_PIPES:
+                        with gr.Column(scale=1, min_width=380, elem_classes="empty-spacer"):
+                            gr.HTML("&nbsp;")  # invisible spacer giu lai 1/3 width
+                        continue
+                    pipe = app.pipes[slot]
+                    with gr.Column(scale=1, min_width=380, elem_classes="result-card-wrap"):
+                        hdr = gr.HTML(_result_header_html(slot, pipe.name, "empty"))
+                        img = gr.Image(
+                            label="",
+                            interactive=False,
+                            height=380,
+                            show_label=False,
+                            container=False,
+                        )
+                        met = gr.HTML(_result_metrics_html(None, "empty"))
+                        result_headers.append(hdr)
+                        result_imgs.append(img)
+                        result_metrics.append(met)
 
+        summary_html = gr.HTML(_summary_table_html(None, "empty"))
+        gr.HTML(_FOOTER_HTML)
+
+        # ===== Callbacks =====
         def _run(snap):
             if snap is None:
-                return [], "**Chua co snapshot.** Hay chup webcam hoac upload anh."
+                # Khong co snapshot -> giu nguyen empty
+                hdrs = [_result_header_html(i, app.pipes[i].name, "empty") for i in range(N_PIPES)]
+                imgs = [None] * N_PIPES
+                mets = [_result_metrics_html(None, "empty")] * N_PIPES
+                return (*hdrs, *imgs, *mets, _summary_table_html(None, "empty"))
             results = app.run_all(None, snap)
-            gallery_items = []
-            rows = [_SUMMARY_HEADER]
-            for (name, r) in results:
-                img = to_rgb(r["annotated"]) if r.get("annotated") is not None else None
-                if img is not None:
-                    gallery_items.append((img, format_caption(name, r)))
-                rows.append(format_row(name, r))
-            return gallery_items, "\n".join(rows)
+            hdrs, imgs, mets = [], [], []
+            for i, (name, r) in enumerate(results):
+                kind = _result_kind(r)
+                hdrs.append(_result_header_html(i, name, kind))
+                imgs.append(to_rgb(r["annotated"]) if r.get("annotated") is not None else None)
+                mets.append(_result_metrics_html(r, kind))
+            return (*hdrs, *imgs, *mets, _summary_table_html(results, "results"))
 
-        capture_btn.click(fn=_run, inputs=[snap_in], outputs=[result_gallery, summary_md])
-        clear_btn.click(
-            fn=lambda: (None, [], ""),
-            inputs=None,
-            outputs=[snap_in, result_gallery, summary_md],
-        )
+        def _clear():
+            hdrs = [_result_header_html(i, app.pipes[i].name, "empty") for i in range(N_PIPES)]
+            imgs = [None] * N_PIPES
+            mets = [_result_metrics_html(None, "empty")] * N_PIPES
+            return (None, *hdrs, *imgs, *mets, _summary_table_html(None, "empty"))
 
-        # Fix Gradio Gallery: trong fullscreen, nut X / phim X khong thoat duoc.
-        # Inject JS de:
-        #   1) Bat ky click vao nut co aria-label chua "close"/"exit" khi dang
-        #      fullscreen -> exitFullscreen() truoc.
-        #   2) Phim 'x' / 'X' -> exit fullscreen va dong preview (click nut close).
-        _fullscreen_fix_js = r"""
+        # JS: nut "Chup" -> click nut camera noi bo cua Gradio webcam de commit frame
+        _capture_js = r"""
         () => {
-            if (window.__fsFixInstalled) return;
-            window.__fsFixInstalled = true;
-
-            const exitFs = () => {
-                if (document.fullscreenElement) {
-                    document.exitFullscreen().catch(() => {});
+            const container = document.getElementById('snap_in_component');
+            if (!container) return;
+            const video = container.querySelector('video');
+            if (!video) return;
+            const selectors = [
+                'button[aria-label="Capture photo"]',
+                'button[aria-label*="apture" i]',
+                'button[title*="apture" i]',
+                'button[aria-label*="hoto" i]',
+                '.controls button',
+                '.webcam button',
+            ];
+            for (const sel of selectors) {
+                const cands = container.querySelectorAll(sel);
+                for (const b of cands) {
+                    if (b && b.offsetParent !== null) { b.click(); return; }
                 }
-            };
-
-            const findCloseBtn = () => {
-                const sels = [
-                    'button[aria-label*="lose" i]',
-                    'button[aria-label*="exit" i]',
-                    'button[title*="lose" i]',
-                    '.gallery .icon-button[aria-label*="lose" i]',
-                ];
-                for (const s of sels) {
-                    const b = document.querySelector(s);
-                    if (b && b.offsetParent !== null) return b;
-                }
-                return null;
-            };
-
+            }
+        }
+        """
+        # JS: toggle thu gon status table
+        _status_toggle_js = r"""
+        () => {
+            if (window.__statusToggleInstalled) return;
+            window.__statusToggleInstalled = true;
             document.addEventListener('click', (e) => {
-                if (!document.fullscreenElement) return;
-                const btn = e.target.closest(
-                    'button[aria-label*="lose" i],' +
-                    'button[aria-label*="exit" i],' +
-                    'button[title*="lose" i]'
-                );
-                if (btn) {
-                    exitFs();
-                }
-            }, true);
-
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'x' || e.key === 'X') {
-                    exitFs();
-                    setTimeout(() => {
-                        const b = findCloseBtn();
-                        if (b) b.click();
-                    }, 50);
-                }
+                const btn = e.target.closest('#status_toggle');
+                if (!btn) return;
+                const list = document.getElementById('status_list');
+                if (!list) return;
+                const collapsed = list.classList.toggle('collapsed');
+                btn.textContent = collapsed ? 'Mở rộng' : 'Thu gọn';
             });
         }
         """
-        demo.load(fn=None, js=_fullscreen_fix_js)
+
+        # Custom lightbox: click anh result -> mo modal full screen voi anh.
+        # Bypass Gradio's native fullscreen API vi no conflict CSS gay flicker.
+        _lightbox_js = r"""
+        () => {
+            if (window.__lightboxInstalled) return;
+            window.__lightboxInstalled = true;
+            const openLightbox = (imgSrc, title) => {
+                const existing = document.querySelector('.fr-lightbox');
+                if (existing) existing.remove();
+                const box = document.createElement('div');
+                box.className = 'fr-lightbox';
+                const titleEl = document.createElement('div');
+                titleEl.className = 'fr-title';
+                titleEl.textContent = title || 'Result';
+                const img = document.createElement('img');
+                img.src = imgSrc;
+                img.alt = title || '';
+                const close = document.createElement('button');
+                close.className = 'fr-close';
+                close.setAttribute('aria-label', 'Đóng (Esc)');
+                close.textContent = '✕';
+                close.onclick = (e) => { e.stopPropagation(); box.remove(); };
+                box.onclick = (e) => { if (e.target === box) box.remove(); };
+                box.appendChild(titleEl);
+                box.appendChild(img);
+                box.appendChild(close);
+                document.body.appendChild(box);
+            };
+            // Esc -> dong lightbox
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    const lb = document.querySelector('.fr-lightbox');
+                    if (lb) lb.remove();
+                }
+            });
+            // Delegate click vao anh trong .result-card-wrap
+            document.addEventListener('click', (e) => {
+                const img = e.target.closest('.result-card-wrap img');
+                if (!img || !img.src) return;
+                // Lay ten pipeline tu header trong cung card
+                const card = img.closest('.result-card-wrap');
+                let title = '';
+                if (card) {
+                    const nameEl = card.querySelector('.pipe-name');
+                    if (nameEl) {
+                        title = (nameEl.childNodes[0]?.textContent || '').trim();
+                    }
+                }
+                openLightbox(img.src, title);
+            });
+        }
+        """
+
+        capture_btn.click(fn=None, inputs=None, outputs=None, js=_capture_js)
+        analyze_btn.click(
+            fn=_run,
+            inputs=[snap_in],
+            outputs=[*result_headers, *result_imgs, *result_metrics, summary_html],
+        )
+        clear_btn.click(
+            fn=_clear,
+            inputs=None,
+            outputs=[snap_in, *result_headers, *result_imgs, *result_metrics, summary_html],
+        )
+        demo.load(fn=None, js=_status_toggle_js)
+        demo.load(fn=None, js=_lightbox_js)
 
     return demo
 
@@ -1024,8 +2029,13 @@ def main():
 
     import gradio as gr
     demo = build_ui(app)
-    demo.launch(server_port=args.port, share=args.share, inbrowser=True,
-                theme=gr.themes.Soft())
+    demo.launch(
+        server_port=args.port,
+        share=args.share,
+        inbrowser=True,
+        css=getattr(demo, "_face_demo_css", None),
+        head=getattr(demo, "_face_demo_head", None),
+    )
 
 
 if __name__ == "__main__":
