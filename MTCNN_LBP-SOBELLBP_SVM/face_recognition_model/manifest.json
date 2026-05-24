@@ -1,0 +1,34 @@
+{
+  "schema_version": 3,
+  "created": "2026-05-24T09:17:20",
+  "sklearn_version": "1.7.2",
+  "random_state": 42,
+  "feature_dim": 10800,
+  "pca_dim": 368,
+  "n_classes": 5,
+  "classes": [
+    "Dan",
+    "Tri",
+    "Triet",
+    "Trieu",
+    "Vi"
+  ],
+  "n_train_aug": 1715,
+  "n_val_calib": 50,
+  "n_val_thresh": 50,
+  "n_test": 48,
+  "val_thresh_frac": 0.5,
+  "augment_variants": 5,
+  "hard_classes": [],
+  "hard_weight": 2.0,
+  "class_weight": "balanced",
+  "has_class_stats": true,
+  "class_stats_shrinkage": {
+    "Dan": 0.5082,
+    "Tri": 0.4933,
+    "Triet": 0.5711,
+    "Trieu": 0.4999,
+    "Vi": 0.6625
+  },
+  "hash": "b6358bc13377"
+}
