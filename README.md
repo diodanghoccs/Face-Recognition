@@ -96,15 +96,15 @@ python app.py
 
 ## Results
 
-*(Cập nhật sau khi hoàn thiện báo cáo)*
+Đánh giá trên tập test (5 người).
 
-| Pipeline | Accuracy | Notes |
-|----------|----------|-------|
-| HOG + SVM | — | |
-| MTCNN + FaceNet | — | |
-| MTCNN + LBP-SobelLBP + SVM | — | |
-| RetinaFace + ArcFace | — | |
-| SCRFD + ArcFace + FAISS | — | |
+| Pipeline | Accuracy | Macro-F1 |
+|----------|----------|----------|
+| HOG + SVM | 0.97 | 0.97 |
+| MTCNN + FaceNet | 1.00 | 1.00 |
+| MTCNN + LBP-SobelLBP + SVM | 0.94 | 0.94 |
+| RetinaFace + ArcFace | 1.00 | 1.00 |
+| SCRFD + ArcFace + FAISS | 0.9714 | 0.97 |
 
 ## Team
 
