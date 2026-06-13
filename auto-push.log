@@ -1,0 +1,27 @@
+ 
+=== Sun 05/24/2026  8:18:29.05 === 
+[1/5] Fetching... 
+From https://github.com/diodanghoccs/Face-Recognition
+ * branch            main       -> FETCH_HEAD
+[2/5] app.py co thay doi. Staging + commit... 
+warning: in the working copy of 'app.py', LF will be replaced by CRLF the next time Git touches it
+[main e63f12b] UI: redesign theo Claude Design - 5 pipeline, custom lightbox, dark snapshot stage, badge status, summary table
+ 1 file changed, 1157 insertions(+), 147 deletions(-)
+[3/5] Rebasing onto origin/main... 
+error: cannot pull with rebase: You have unstaged changes.
+error: Please commit or stash them.
+ABORT: rebase conflict. Aborting rebase... 
+fatal: no rebase in progress
+CO XUNG DOT - khong push. User can manual review. 
+ 
+=== Sun 05/24/2026  8:46:08.71 === 
+[1/5] Fetching... 
+From https://github.com/diodanghoccs/Face-Recognition
+ * branch            main       -> FETCH_HEAD
+[2/5] app.py chua co thay doi. Skip commit. 
+[3/5] Rebasing onto origin/main... 
+error: cannot pull with rebase: You have unstaged changes.
+error: Please commit or stash them.
+ABORT: rebase conflict. Aborting rebase... 
+fatal: no rebase in progress
+CO XUNG DOT - khong push. User can manual review. 
