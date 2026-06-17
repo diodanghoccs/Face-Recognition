@@ -1,16 +1,16 @@
 # Đồ án cuối kỳ CS231 — Hệ thống Nhận diện Khuôn mặt
 
-Nghiên cứu so sánh nhiều pipeline nhận diện khuôn mặt, thực hiện cho môn CS231.
+Repo gồm 5 pipeline nhận diện khuôn mặt khác nhau, từ đặc trưng thủ công (HOG, LBP) đến các model deep learning (FaceNet, ArcFace). Mục tiêu là so sánh xem cách nào nhận diện và phát hiện mặt tốt hơn. Đây là đồ án cuối kỳ môn CS231.
 
 ## Các hướng tiếp cận
 
 | Thư mục | Pipeline | Mô tả |
 |---------|----------|-------|
-| `HOG_SVM/` | HOG + SVM | Đặc trưng thủ công truyền thống kết hợp bộ phân loại SVM |
-| `MTCNN_LBP-SOBELLBP_SVM/` | MTCNN + LBP/Sobel-LBP + SVM | Đặc trưng kết cấu (texture) với SVM, có hiệu chỉnh ngưỡng |
-| `MTCNN_FACENET/` | MTCNN + FaceNet | Phát hiện bằng deep learning + nhận diện dựa trên embedding |
-| `RETINAFACE_ARCFACE/` | RetinaFace + ArcFace | Phát hiện hiện đại + ArcFace margin loss |
-| `SRCFD_ARCFACE_FAISS/` | SCRFD + ArcFace + FAISS | Truy hồi nhanh quy mô lớn bằng chỉ mục FAISS |
+| `HOG_SVM/` | HOG + SVM | Trích đặc trưng HOG rồi phân loại bằng SVM |
+| `MTCNN_LBP-SOBELLBP_SVM/` | MTCNN + LBP/Sobel-LBP + SVM | Cắt mặt bằng MTCNN, trích texture LBP/Sobel-LBP, phân loại SVM kèm ngưỡng open-set |
+| `MTCNN_FACENET/` | MTCNN + FaceNet | Cắt mặt bằng MTCNN, nhận diện qua embedding FaceNet |
+| `RETINAFACE_ARCFACE/` | RetinaFace + ArcFace | Phát hiện bằng RetinaFace, nhận diện qua embedding ArcFace |
+| `SRCFD_ARCFACE_FAISS/` | SCRFD + ArcFace + FAISS | Phát hiện SCRFD, embedding ArcFace, tra cứu bằng FAISS |
 
 ## Cấu trúc dự án
 
@@ -106,5 +106,14 @@ python app.py
 
 > **Acc /50 (end-to-end):** tính trên toàn bộ 50 ảnh test; khuôn mặt bị detector bỏ sót được tính là dự đoán sai. Khác với cột **"Acc trên mặt detect"** chỉ tính trên số mặt mỗi pipeline phát hiện được.
 
+## Nhóm thực hiện
 
-CS231 — Trường Đại học Công nghệ Thông tin (UIT)
+| Họ và tên | MSSV |
+|-----------|------|
+| Lê Trần Phú Trọng | 24521863 |
+| Trần Đăng Khắc Triệu | 24521857 |
+| Đào Xuân Minh Trí | 24521826 |
+| Nguyễn Minh Triết | 24521852 |
+| Nguyễn Võ An Vi | 24521989 |
+| Nguyễn Châu Anh Tuấn | 24521932 |
+| Trần Thiện Đan | 24520249 |
